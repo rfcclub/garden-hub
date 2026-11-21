@@ -1,0 +1,84 @@
+name: Record intent approval
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+  issue_comment:
+    types: [edited]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  approve:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish or record an authorized approval
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const marker = "<!-- garden-hub-intent-approve -->";
+            const unchecked = "- [ ] Approve implementation";
+            const checked = "- [x] Approve implementation";
+            const botLogin = "github-actions[bot]";
+            const issue = context.payload.issue;
+            const labels = issue.labels.map(({ name }) => name);
+            const request = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+            };
+
+            if (context.eventName === "issues") {
+              if (!labels.includes("orca:intent") || labels.includes("orca:approved")) {
+                return core.notice("Issue is not an unapproved intent");
+              }
+
+              const comments = await github.paginate(github.rest.issues.listComments, request);
+              const hasControl = comments.some((comment) =>
+                comment.user.login === botLogin && comment.body.includes(marker),
+              );
+              if (hasControl) {
+                return core.notice("Approval control already exists");
+              }
+
+              await github.rest.issues.createComment({
+                ...request,
+                body: `${marker}\n${unchecked}\n\nAn eligible collaborator can tick this native GitHub checkbox to approve implementation.`,
+              });
+              return;
+            }
+
+            const comment = context.payload.comment;
+            const previousBody = context.payload.changes?.body?.from ?? "";
+            if (!previousBody.includes(unchecked) || !comment.body.includes(checked)) {
+              return core.notice("No checked approval control found");
+            }
+            if (comment.user.login !== botLogin || !comment.body.includes(marker)) {
+              return core.warning("Approval control is not GitHub Actions-owned");
+            }
+            if (!labels.includes("orca:intent") || labels.includes("orca:approved")) {
+              return core.notice("Issue is not an unapproved intent");
+            }
+
+            const actor = context.payload.sender.login;
+            const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: actor,
+            });
+            const allowed = ["write", "maintain", "admin"];
+
+            if (!allowed.includes(data.permission)) {
+              return core.warning(`Ignoring approval request from ${actor}: ${data.permission}`);
+            }
+
+            await github.rest.issues.addLabels({
+              ...request,
+              labels: ["orca:approved"],
+            });
+            await github.rest.issues.createComment({
+              ...request,
+              body: `Approval recorded for @${actor}.`,
+            });
