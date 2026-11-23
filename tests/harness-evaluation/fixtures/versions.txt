@@ -1,0 +1,4 @@
+codex-cli 0.135.0
+2.1.330 (Claude Code)
+v26.5.0
+Darwin arm64
