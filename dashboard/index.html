@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Garden Hub - read-only dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <h1>Garden Hub</h1>
+      <p class="subtitle">Read-only view of recent events and blocked work.</p>
+    </header>
+
+    <main>
+      <section aria-labelledby="events-heading">
+        <h2 id="events-heading">Events</h2>
+        <p class="meta" id="events-status" role="status">Loading events.</p>
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Time</th>
+              <th scope="col">Type</th>
+              <th scope="col">Agent</th>
+              <th scope="col">Project</th>
+            </tr>
+          </thead>
+          <tbody id="events-body"></tbody>
+        </table>
+        <p class="more"><button type="button" id="events-more" hidden>More events</button></p>
+      </section>
+
+      <section aria-labelledby="works-heading">
+        <h2 id="works-heading">Blocked work</h2>
+        <p class="meta" id="works-status" role="status">Loading work.</p>
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Repository</th>
+              <th scope="col">Issue</th>
+              <th scope="col">Reason</th>
+              <th scope="col">Pull request</th>
+              <th scope="col">Updated</th>
+            </tr>
+          </thead>
+          <tbody id="works-body"></tbody>
+        </table>
+        <p class="more"><button type="button" id="works-more" hidden>More work</button></p>
+      </section>
+    </main>
+
+    <footer>
+      <p>Garden Hub dashboard. Labels come from the local configuration file.</p>
+    </footer>
+  </body>
+</html>
