@@ -7,6 +7,7 @@ import { mkdirSync, watch } from 'node:fs';
 import { createStore } from './ghub-mcp-store.mjs';
 import {
   CLAUDE_CHANNEL_CAPABILITY,
+  CODEX_TRUST_ENV,
   createWakePublisher,
   isTrustedCodexServer,
   resolveWakeAdapter,
@@ -147,6 +148,7 @@ export function createMcpServer({
   peers = (process.env.GHUB_MCP_PEERS || 'codex,claude-code').split(',').filter(Boolean),
   wakeAdapter = process.env.GHUB_MCP_WAKE_ADAPTER,
   serverName = process.env.GHUB_MCP_SERVER_NAME || SERVER_NAME,
+  trustedCodexServer = process.env[CODEX_TRUST_ENV],
   emitNotification = (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`),
   onWakeError = (error) => process.stderr.write(`garden-hub wake failed: ${error.message}\n`),
   github = {
@@ -282,8 +284,9 @@ export function createMcpServer({
     }
     if (method === 'initialize') {
       adapter = resolveWakeAdapter(wakeMode, params);
-      // codex/user-input is native ingress: fail closed unless this server is the trusted name.
-      if (adapter === 'codex' && !isTrustedCodexServer(serverName)) adapter = '';
+      // codex/user-input is native ingress: fail closed unless the operator explicitly
+      // opted in to this exact advertised server name.
+      if (adapter === 'codex' && !isTrustedCodexServer(serverName, trustedCodexServer)) adapter = '';
       negotiated = Boolean(adapter);
       // Forced common advertises the capability even when the client did not negotiate it.
       const advertised = adapter || (wakeMode === 'common' ? 'common' : '');

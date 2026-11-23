@@ -12,7 +12,7 @@ Server configuration:
 | empty/unset (`auto`) | Choose per connection at `initialize` (default, see below) |
 | `off` | No notifications or watcher |
 | `common` | Require client `capabilities.experimental["garden-hub/channel-wake"] = {"version":1}` |
-| `codex` | Explicit bridge to trusted native `codex/user-input` |
+| `codex` | Explicit bridge to native `codex/user-input`; still requires the trusted-name opt-in below |
 | `omp` | Explicit bridge to the native OMP extension event |
 | `claude` | Explicit bridge to Claude Code channels (`notifications/claude/channel`) |
 
@@ -51,21 +51,32 @@ Codex emits `{"jsonrpc":"2.0","method":"codex/user-input","params":{"text":"..."
 where text is the fixed local `INBOX_INSTRUCTION`, never third-party message text.
 Its patched native allowlist must include exactly `garden-hub`.
 
-The Garden Hub side is fail-closed too: the `codex` bridge is granted per MCP
-server name (`GHUB_MCP_SERVER_NAME`, default and only trusted value
-`garden-hub`). Under the `codex` adapter, a process reporting any other name in
-`serverInfo.name` is downgraded to no wake: it neither advertises the wake
-capability nor emits `codex/user-input`, so a lookalike registration cannot turn
-an arbitrary MCP server into a user turn. The store and inbox keep working in
-that case; mail is pull-only.
+The Garden Hub side is opt-in, never default-on: the `codex` bridge is granted
+only when `GHUB_MCP_TRUSTED_CODEX_SERVER` is set to the exact trusted value
+`garden-hub`. `GHUB_MCP_SERVER_NAME` (the advertised `serverInfo.name`, default
+`garden-hub`) carries no trust: an unset or different trust env downgrades the
+`codex` adapter to no wake, so the process neither advertises the wake capability
+nor emits `codex/user-input`. The store and inbox keep working; mail is
+pull-only.
 
-That name gate covers the `codex` bridge only. It is not a global server-name
-policy: the `common`, `omp` and `claude` adapters still advertise the negotiated
+What this does and does not prove. The trust env is read by the same operator who
+launches the process, so it records a deliberate opt-in and keeps a stock
+registration pull-only; it is not a defense against whoever chooses that
+registration's env. The enforcing boundary is the client's own gate: patched
+Codex accepts `codex/user-input` only from the MCP server it has registered as
+exactly `garden-hub`, and that registered-name allowlist is what stops a
+lookalike or unrelated server from producing a user turn. Configure the opt-in
+env on the process registered as `garden-hub`, and do not add other servers to
+that client-side allowlist.
+
+The opt-in covers the `codex` bridge only. It is not a global server-name policy:
+the `common`, `omp` and `claude` adapters still advertise the negotiated
 `garden-hub/channel-wake` capability and emit their own notification shape
-whatever `serverInfo.name` says. Those paths are trusted on the client side
-instead, so a deployment that relies on them must register the server as exactly
-`garden-hub` and filter the raw server name there (the OMP extension below does
-both).
+whatever `serverInfo.name` and the trust env say. Those paths are trusted
+entirely on the client side, so a deployment that relies on them must register
+the server as exactly `garden-hub` and filter the raw server name there (the OMP
+extension below does both). Garden Hub itself does not verify that a connecting
+client is who it claims, and it cannot tell an unrelated MCP server from this one.
 
 ## OMP
 
