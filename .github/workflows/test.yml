@@ -19,3 +19,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: npm run test:orca
+      - run: npm run test:wake
+      - run: npx vitest run tests/client-auto-wake/specs tests/github-issue-approval-action --maxWorkers=1 --no-file-parallelism
