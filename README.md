@@ -66,7 +66,9 @@ The configuration file is JSON with optional lists. Every name in it is an allow
   "projects": ["project-1"],
   "repositories": ["example-org/example-repo"],
   "eventTypes": ["TASK_CLAIMED", "BLOCKER_REPORTED"],
-  "blockedReasons": [{ "pattern": "^needs-owner", "label": "Needs an owner" }]
+  "blockedReasons": [{ "pattern": "^needs-owner", "label": "Needs an owner" }],
+  "ownerActionable": ["^needs-owner"],
+  "queueStaleAfterSeconds": 3600
 }
 ```
 
@@ -77,6 +79,8 @@ The configuration file is JSON with optional lists. Every name in it is an allow
 | `repositories` | `owner/name` repositories shown on blocked work, and the only repositories whose pull-request URLs are returned | `Other repository` |
 | `eventTypes` | Event types shown verbatim | `Other event` |
 | `blockedReasons` | Regular expressions matched against `blocked_reason`; a matching entry is shown as its `label` (or the pattern itself, for a bare string) | `Other reason` |
+| `ownerActionable` | Regular expressions that promote a blocked row into a needs-the-owner item. With none configured the queue reports `rule-missing` and never claims an empty result | none; `rule-missing` |
+| `queueStaleAfterSeconds` | Age after which an item is marked stale. Defaults to 3600 | `3600` |
 
 The file is validated when the server starts: wrong types, an invalid regular expression, or a repository that is not `owner/name` stops the server with a configuration error rather than silently widening what is shown.
 
@@ -84,9 +88,24 @@ The file is validated when the server starts: wrong types, an invalid regular ex
 
 - `GET /api/events?limit=60&cursor=...` - bounded pages of the event log, newest first. Only `ts`, `type`, `agent` and `project` cross the boundary; event payloads are never returned.
 - `GET /api/works?limit=60&cursor=...` - bounded pages of blocked work, newest first.
+- `GET /api/queue` - the needs-the-owner queue. See below.
 - `GET /`, `/app.js`, `/styles.css` - the static page and its assets.
 
 Safety properties: the server binds IPv4 loopback only; `Host` and `Origin` must be loopback; only `GET` is accepted; responses carry a restrictive `Content-Security-Policy`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`; pagination is bounded; and unknown paths return a plain 404 without reading files outside `dashboard/`.
+
+### Needs-the-owner queue
+
+`GET /api/queue` is the first screen of the page: a read-only, triage-ordered list of observations that may need the owner. The first source-backed slice is **blocked work**. A row becomes an item only when all of these hold, so `state = 'blocked'` alone is never promoted into an owner-action requirement:
+
+- the repository is in `repositories`;
+- `issue` is a positive integer;
+- `blocked_reason` matches one of the `ownerActionable` regular expressions.
+
+With no `ownerActionable` entry the category reports `status: "rule-missing"` and `complete: false`; it never reports an empty queue. Each item carries `source`, `category`, a stable `id` (`works:<repo>:<issue>`), a bounded `description` (the `blockedReasons` label, never raw text), `observed_at`/`age_seconds`/`age_meaning` (`source-updated`: the `works.updated_at` of the observation), `first_seen` (always `null` for this slice), `provenance`, `stale` and a `link` only when it is a pull-request URL for an allowlisted repository; otherwise a GitHub issue link built from the allowlisted repository and the issue number. Items are ordered with unreadable timestamps first, then oldest observation first. Resolve an item at its source (the pull request or issue); the queue has no write action.
+
+The category reports its own state and uncertainty: `ok` (with `complete`), `truncated` (more than 100 matching rows), `unavailable` (no database path or unreadable database) and `rule-missing`. `page.source` is `unavailable` when the one live category is unavailable; an absent, failed or truncated source never produces an authoritative empty queue. An item leaves the queue only when the source shows `works.state` is no longer `blocked`.
+
+Deferred categories are reported in `page.deferred` with `status: "deferred"` and are not shown as complete: pending intent approvals, pending confirmations, pending escalations, provider quota near a ceiling, and unreachable machines. Each needs its own authoritative source and resolution condition in a later slice.
 
 ### Work database schema
 

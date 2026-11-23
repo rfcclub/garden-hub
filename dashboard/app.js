@@ -4,6 +4,9 @@
 'use strict';
 
 (function main() {
+  const queueList = document.getElementById('queue-list');
+  const queueStatus = document.getElementById('queue-status');
+  const queueCategories = document.getElementById('queue-categories');
   const eventsBody = document.getElementById('events-body');
   const eventsStatus = document.getElementById('events-status');
   const eventsMore = document.getElementById('events-more');
@@ -19,6 +22,123 @@
 
   function clear(node) {
     while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  function safeHref(value) {
+    // The server only builds links from allowlisted destinations. The client
+    // still refuses anything that is not a plain https URL, so a future source
+    // cannot smuggle in another scheme.
+    if (typeof value !== 'string') return null;
+    let parsed;
+    try {
+      parsed = new URL(value);
+    } catch {
+      return null;
+    }
+    return parsed.protocol === 'https:' ? parsed.href : null;
+  }
+
+  function formatAge(seconds) {
+    if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return 'observed at an unknown time';
+    if (seconds < 90) return 'observed less than two minutes ago';
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 90) return `observed ${minutes} minutes ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 48) return `observed ${hours} hours ago`;
+    return `observed ${Math.round(hours / 24)} days ago`;
+  }
+
+  const CATEGORY_STATE = {
+    ok: (category) =>
+      category.items.length === 0
+        ? `No active items. Source checked and current.`
+        : `${category.items.length} active ${category.items.length === 1 ? 'item' : 'items'}.`,
+    truncated: () => 'Source returned more rows than the queue reads; this list is incomplete.',
+    unavailable: () => 'Source unavailable. This is not an empty queue.',
+    'rule-missing': () => 'No owner-actionable rule is configured, so nothing is shown or claimed.',
+  };
+
+  function queueItem(item) {
+    const li = document.createElement('li');
+    li.className = 'queue-item';
+
+    const heading = document.createElement('p');
+    heading.className = 'queue-item-heading';
+    heading.textContent = item.description === undefined || item.description === null ? 'Unknown reason' : String(item.description);
+    li.append(heading);
+
+    const meta = document.createElement('p');
+    meta.className = 'status';
+    const parts = [String(item.category || 'unknown category'), String(item.source || 'unknown source')];
+    if (item.repository) parts.push(String(item.repository));
+    if (item.issue) parts.push(`#${item.issue}`);
+    meta.textContent = `${parts.join(' - ')} - ${formatAge(item.age_seconds)} (${String(item.age_meaning || 'unknown')})`;
+    li.append(meta);
+
+    if (typeof item.provenance === 'string') {
+      const provenance = document.createElement('p');
+      provenance.className = 'status';
+      provenance.textContent = `Provenance: ${item.provenance}`;
+      li.append(provenance);
+    }
+
+    if (item.stale === true) {
+      const stale = document.createElement('p');
+      stale.className = 'status stale';
+      stale.textContent = 'This observation is older than the refresh window.';
+      li.append(stale);
+    }
+
+    const href = item.link ? safeHref(item.link.href) : null;
+    if (href) {
+      const resolve = document.createElement('p');
+      const a = document.createElement('a');
+      a.href = href;
+      a.rel = 'noopener noreferrer';
+      a.textContent = typeof item.link.label === 'string' ? item.link.label : 'Open source';
+      resolve.append(a);
+      li.append(resolve);
+    }
+
+    return li;
+  }
+
+  function loadQueue() {
+    fetchPage('/api/queue', null)
+      .then((page) => {
+        clear(queueList);
+        const lines = [];
+        for (const category of Array.isArray(page.categories) ? page.categories : []) {
+          const describe = CATEGORY_STATE[category.status] || (() => 'Source state unknown.');
+          const header = document.createElement('li');
+          header.className = 'queue-category';
+          const title = document.createElement('p');
+          title.className = 'queue-item-heading';
+          title.textContent = typeof category.label === 'string' ? category.label : 'Unnamed category';
+          const state = document.createElement('p');
+          state.className = 'status';
+          state.textContent = describe(category);
+          header.append(title, state);
+          queueList.append(header);
+          for (const item of Array.isArray(category.items) ? category.items : []) {
+            queueList.append(queueItem(item));
+          }
+          lines.push(`${title.textContent}: ${state.textContent}`);
+        }
+        for (const deferred of Array.isArray(page.deferred) ? page.deferred : []) {
+          lines.push(`${typeof deferred.label === 'string' ? deferred.label : 'Unnamed category'}: not yet supported (${String(deferred.status || 'deferred')})`);
+        }
+        queueStatus.textContent =
+          page.source === 'available'
+            ? 'Ordered for the owner to triage. Resolve items at their source; this page is read-only.'
+            : 'The queue source is unavailable. This is not an empty queue.';
+        queueCategories.textContent = lines.join(' ');
+      })
+      .catch(() => {
+        clear(queueList);
+        queueCategories.textContent = '';
+        queueStatus.textContent = 'The queue source is unavailable. This is not an empty queue.';
+      });
   }
 
   function formatTime(value) {
@@ -104,8 +224,10 @@
     if (cursor) loadWorks(cursor);
   });
 
+  clear(queueList);
   clear(eventsBody);
   clear(worksBody);
+  loadQueue();
   loadEvents(null);
   loadWorks(null);
 })();

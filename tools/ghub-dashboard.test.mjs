@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
-import { createDashboardServer, loadConfigFile } from './ghub-dashboard.mjs';
+import { createDashboardServer, loadConfigFile, normalizeConfig } from './ghub-dashboard.mjs';
 
 const DASHBOARD_DIR = fileURLToPath(new URL('../dashboard/', import.meta.url));
 
@@ -315,4 +315,248 @@ test('DASH-009: a configuration file is loaded and validated', () => {
   const badRepo = join(dir, 'bad-repo.json');
   writeFileSync(badRepo, JSON.stringify({ repositories: ['not-a-repository'] }));
   assert.throws(() => loadConfigFile(badRepo), /repositories/);
+});
+
+
+// --- needs-the-owner queue ------------------------------------------------
+//
+// The first source-backed slice is blocked work that an explicit, configured
+// rule marks owner-actionable. A row is owner-actionable only when its
+// repository is allowlisted, its issue is a positive integer and its
+// blocked_reason matches an `ownerActionable` pattern. `state = 'blocked'`
+// alone is never enough to promote a row into an owner-action requirement.
+
+const QUEUE_CONFIG = {
+  ...CONFIG,
+  ownerActionable: ['^needs-owner'],
+  queueStaleAfterSeconds: 3600,
+};
+
+function isoAgo(seconds) {
+  return new Date(Date.now() - seconds * 1000).toISOString();
+}
+
+function queueWorkRow({ ageSeconds = 60, ...rest } = {}) {
+  return { ...workRow(rest), updated_at: isoAgo(ageSeconds) };
+}
+
+function queuePage(socketPath) {
+  return get(socketPath, '/api/queue').then((res) => {
+    assert.equal(res.status, 200);
+    return JSON.parse(res.body);
+  });
+}
+
+function category(page, id) {
+  const found = page.categories.find((entry) => entry.id === id);
+  assert.ok(found, `missing category ${id}`);
+  return found;
+}
+
+test('DASH-010: queue shows owner-actionable blocked work with provenance, age and a safe link', async () => {
+  const dbPath = worksDb([
+    queueWorkRow({ issue: 8, pr_url: `https://github.com/${SECRET_REPO}/pull/8` }),
+    queueWorkRow({ issue: 9, blocked_reason: 'waiting on upstream' }),
+    { ...queueWorkRow({ issue: 10 }), repo: OTHER_REPO },
+  ]);
+  await withServer({ config: QUEUE_CONFIG, dbPath }, async ({ socketPath }) => {
+    const page = await queuePage(socketPath);
+    assert.equal(page.source, 'available');
+    assert.equal(typeof page.generated_at, 'string');
+    const work = category(page, 'blocked-work');
+    assert.equal(work.status, 'ok');
+    assert.equal(work.truncated, false);
+    assert.equal(work.items.length, 1);
+
+    const item = work.items[0];
+    assert.equal(item.source, 'works');
+    assert.equal(item.category, 'blocked-work');
+    assert.equal(item.id, `works:${SECRET_REPO}:8`);
+    assert.equal(item.repository, SECRET_REPO);
+    assert.equal(item.issue, 8);
+    assert.equal(typeof item.observed_at, 'string');
+    assert.equal(typeof item.age_seconds, 'number');
+    assert.ok(item.age_seconds >= 59 && item.age_seconds <= 120, `unexpected age ${item.age_seconds}`);
+    assert.equal(item.age_meaning, 'source-updated');
+    assert.equal(item.provenance, 'ownerActionable rule on works.blocked_reason');
+    assert.deepEqual(item.link, {
+      href: `https://github.com/${SECRET_REPO}/pull/8`,
+      label: 'Pull request',
+      kind: 'pull-request',
+    });
+    assert.equal(item.first_seen, null);
+    assert.equal(item.stale, false);
+    for (const excluded of ['waiting on upstream', OTHER_REPO, SECRET_PAYLOAD]) {
+      assert.equal(JSON.stringify(page).includes(excluded), false, `leaked ${excluded}`);
+    }
+  });
+});
+
+test('DASH-011: without an owner-actionable rule the queue claims no empty result', async () => {
+  const dbPath = worksDb([queueWorkRow()]);
+  await withServer({ config: CONFIG, dbPath }, async ({ socketPath }) => {
+    const page = await queuePage(socketPath);
+    const work = category(page, 'blocked-work');
+    assert.equal(work.status, 'rule-missing');
+    assert.equal(work.rule_configured, false);
+    assert.equal(work.items.length, 0);
+    assert.equal(work.complete, false);
+  });
+});
+
+test('DASH-012: an unavailable source is never an empty complete queue', async () => {
+  await withServer({ config: QUEUE_CONFIG }, async ({ socketPath }) => {
+    const page = await queuePage(socketPath);
+    assert.equal(page.source, 'unavailable');
+    const work = category(page, 'blocked-work');
+    assert.equal(work.status, 'unavailable');
+    assert.equal(work.complete, false);
+    assert.deepEqual(work.items, []);
+    assert.equal(work.truncated, false);
+  });
+
+  const broken = join(tmpdirFor('queue-broken'), 'not-a-database.db');
+  writeFileSync(broken, 'not sqlite');
+  await withServer({ config: QUEUE_CONFIG, dbPath: broken }, async ({ socketPath }) => {
+    const page = await queuePage(socketPath);
+    assert.equal(page.source, 'unavailable');
+    assert.equal(category(page, 'blocked-work').complete, false);
+    assert.equal(JSON.stringify(page).includes(broken), false);
+  });
+});
+
+test('DASH-013: a truncated source is reported as incomplete, not as the whole queue', async () => {
+  const rows = [];
+  for (let issue = 1; issue <= 101; issue += 1) rows.push(queueWorkRow({ issue }));
+  const dbPath = worksDb(rows);
+  await withServer({ config: QUEUE_CONFIG, dbPath }, async ({ socketPath }) => {
+    const page = await queuePage(socketPath);
+    const work = category(page, 'blocked-work');
+    assert.equal(work.status, 'truncated');
+    assert.equal(work.truncated, true);
+    assert.equal(work.complete, false);
+    assert.equal(work.items.length, 100);
+    assert.equal(work.limit, 100);
+  });
+});
+
+test('DASH-014: an observation older than the window is shown as stale', async () => {
+  const stalePath = worksDb([queueWorkRow({ issue: 8, ageSeconds: 7200 })]);
+  await withServer({ config: QUEUE_CONFIG, dbPath: stalePath }, async ({ socketPath }) => {
+    const work = category(await queuePage(socketPath), 'blocked-work');
+    assert.equal(work.items[0].stale, true);
+    assert.equal(work.stale_items, 1);
+    assert.equal(work.status, 'ok');
+  });
+
+  const freshPath = worksDb([queueWorkRow({ issue: 8, ageSeconds: 60 })]);
+  await withServer({ config: QUEUE_CONFIG, dbPath: freshPath }, async ({ socketPath }) => {
+    const work = category(await queuePage(socketPath), 'blocked-work');
+    assert.equal(work.items[0].stale, false);
+    assert.equal(work.stale_items, 0);
+    assert.equal(work.status, 'ok');
+  });
+});
+
+test('DASH-015: an item leaves the queue only when the source confirms resolution', async () => {
+  const dbPath = worksDb([queueWorkRow({ issue: 8 }), queueWorkRow({ issue: 9 })]);
+  await withServer({ config: QUEUE_CONFIG, dbPath }, async ({ socketPath }) => {
+    const before = category(await queuePage(socketPath), 'blocked-work');
+    assert.deepEqual(before.items.map((item) => item.issue), [8, 9]);
+
+    const db = new DatabaseSync(dbPath);
+    db.prepare("UPDATE works SET state = 'done' WHERE issue = 8").run();
+    db.close();
+    const after = category(await queuePage(socketPath), 'blocked-work');
+    assert.deepEqual(after.items.map((item) => item.issue), [9]);
+    assert.equal(after.complete, true);
+  });
+
+  const empty = worksDb([]);
+  await withServer({ config: QUEUE_CONFIG, dbPath: empty }, async ({ socketPath }) => {
+    const none = category(await queuePage(socketPath), 'blocked-work');
+    assert.equal(none.status, 'ok');
+    assert.equal(none.items.length, 0);
+    assert.equal(none.complete, true);
+  });
+});
+
+test('DASH-016: queue links stay on allowlisted destinations and unapproved schemes drop out', async () => {
+  const dbPath = worksDb([
+    { ...queueWorkRow({ issue: 8 }), pr_url: 'javascript:alert(1)' },
+    { ...queueWorkRow({ issue: 9 }), pr_url: 'https://example.com/other-org/other-repo/pull/9' },
+    queueWorkRow({ issue: 11, pr_url: `https://github.com/${SECRET_REPO}/issues/11` }),
+  ]);
+  await withServer({ config: QUEUE_CONFIG, dbPath }, async ({ socketPath }) => {
+    const page = await queuePage(socketPath);
+    const work = category(page, 'blocked-work');
+    assert.equal(work.items.length, 3);
+    for (const item of work.items) {
+      assert.equal(item.link.kind, 'issue');
+      assert.equal(item.link.href, `https://github.com/${SECRET_REPO}/issues/${item.issue}`);
+      assert.equal(item.link.label, 'Issue');
+    }
+    const text = JSON.stringify(page);
+    for (const unsafe of ['javascript:', 'example.com']) {
+      assert.equal(text.includes(unsafe), false, `leaked ${unsafe}`);
+    }
+  });
+});
+
+test('DASH-017: the page names supported and deferred categories and leads with the queue', async () => {
+  await withServer({ config: QUEUE_CONFIG }, async ({ socketPath }) => {
+    const page = await queuePage(socketPath);
+    assert.deepEqual(
+      page.categories.map((entry) => entry.id),
+      ['blocked-work'],
+    );
+    assert.equal(category(page, 'blocked-work').label, 'Blocked work');
+    assert.deepEqual(
+      page.deferred.map((entry) => entry.id).sort(),
+      ['pending-approvals', 'pending-confirmations', 'pending-escalations', 'provider-quota', 'unreachable-machines'],
+    );
+    for (const entry of page.deferred) {
+      assert.equal(entry.status, 'deferred');
+      assert.equal(typeof entry.label, 'string');
+    }
+
+    const html = (await get(socketPath, '/')).body;
+    assert.ok(html.includes('id="queue"'), 'queue section is present');
+    assert.ok(html.indexOf('id="queue"') < html.indexOf('id="events-heading"'), 'queue comes first');
+    assert.ok(html.indexOf('id="queue"') < html.indexOf('id="works-heading"'), 'queue comes first');
+    assert.equal(/<form|<button type="submit"/i.test(html), false, 'the queue offers no write action');
+  });
+});
+
+test('DASH-018: the queue config is validated rather than widened silently', () => {
+  assert.throws(() => normalizeConfig({ ownerActionable: 'needs-owner' }), /ownerActionable/);
+  assert.throws(() => normalizeConfig({ ownerActionable: ['[unclosed'] }), /ownerActionable/);
+  assert.throws(() => normalizeConfig({ queueStaleAfterSeconds: 0 }), /queueStaleAfterSeconds/);
+  assert.throws(() => normalizeConfig({ queueStaleAfterSeconds: 'soon' }), /queueStaleAfterSeconds/);
+  const normalized = normalizeConfig({ ownerActionable: ['^needs-owner'] });
+  assert.deepEqual(normalized.ownerActionable, ['^needs-owner']);
+  assert.equal(normalized.queueStaleAfterSeconds, 3600);
+});
+
+test('DASH-019: queue items are ordered oldest observation first for triage', async () => {
+  const dbPath = worksDb([
+    queueWorkRow({ issue: 5, ageSeconds: 600 }),
+    queueWorkRow({ issue: 6, ageSeconds: 7200 }),
+    queueWorkRow({ issue: 7, ageSeconds: 60 }),
+  ]);
+  await withServer({ config: QUEUE_CONFIG, dbPath }, async ({ socketPath }) => {
+    const work = category(await queuePage(socketPath), 'blocked-work');
+    assert.deepEqual(work.items.map((item) => item.issue), [6, 5, 7]);
+  });
+});
+
+test('DASH-020: an observation with no readable time sorts first and claims no age', async () => {
+  const dbPath = worksDb([{ ...queueWorkRow({ issue: 5 }), updated_at: 'not-a-time' }, queueWorkRow({ issue: 6 })]);
+  await withServer({ config: QUEUE_CONFIG, dbPath }, async ({ socketPath }) => {
+    const work = category(await queuePage(socketPath), 'blocked-work');
+    assert.deepEqual(work.items.map((item) => item.issue), [5, 6]);
+    assert.equal(work.items[0].age_seconds, null);
+    assert.equal(work.items[0].observed_at, null);
+    assert.equal(work.items[0].stale, true);
+  });
 });

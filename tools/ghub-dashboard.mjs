@@ -98,10 +98,46 @@ function blockedReasonList(value) {
   });
 }
 
+const DEFAULT_QUEUE_STALE_SECONDS = 3600;
+
+// Patterns that decide which blocked work is owner-actionable. `state =
+// 'blocked'` alone never promotes a row into an owner-action requirement.
+function ownerActionableList(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) fail('ownerActionable must be an array of regular expressions');
+  return value.map((pattern) => {
+    if (typeof pattern !== 'string' || pattern.trim() === '') {
+      fail('ownerActionable must contain non-empty regular expressions');
+    }
+    try {
+      new RegExp(pattern); // eslint-disable-line no-new
+    } catch {
+      fail(`ownerActionable pattern is not a valid regular expression: ${pattern}`);
+    }
+    return pattern;
+  });
+}
+
+function queueStaleAfterSeconds(value) {
+  if (value === undefined) return DEFAULT_QUEUE_STALE_SECONDS;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    fail('queueStaleAfterSeconds must be a positive whole number of seconds');
+  }
+  return value;
+}
+
 // Returns a plain, validated configuration object.
 export function normalizeConfig(raw) {
   if (raw === undefined || raw === null) {
-    return { agents: [], projects: [], repositories: [], eventTypes: [], blockedReasons: [] };
+    return {
+      agents: [],
+      projects: [],
+      repositories: [],
+      eventTypes: [],
+      blockedReasons: [],
+      ownerActionable: [],
+      queueStaleAfterSeconds: DEFAULT_QUEUE_STALE_SECONDS,
+    };
   }
   if (typeof raw !== 'object' || Array.isArray(raw)) fail('configuration must be an object');
   return {
@@ -110,6 +146,8 @@ export function normalizeConfig(raw) {
     repositories: stringList(raw.repositories, 'repositories'),
     eventTypes: stringList(raw.eventTypes, 'eventTypes'),
     blockedReasons: blockedReasonList(raw.blockedReasons),
+    ownerActionable: ownerActionableList(raw.ownerActionable),
+    queueStaleAfterSeconds: queueStaleAfterSeconds(raw.queueStaleAfterSeconds),
   };
 }
 
@@ -150,6 +188,10 @@ function compileConfig(raw) {
     repositoryLabels: lower(config.repositories),
     eventTypes: new Set(config.eventTypes),
     blockedReasons: config.blockedReasons.map(({ pattern, label }) => ({ regex: new RegExp(pattern), label })),
+    // A blocked row is owner-actionable only when one configured rule matches.
+    ownerActionable: config.ownerActionable.map((pattern) => new RegExp(pattern)),
+    ownerActionableConfigured: config.ownerActionable.length > 0,
+    queueStaleAfterSeconds: config.queueStaleAfterSeconds,
     // Every accepted pull-request URL is built from the repository allowlist.
     pullRequestPatterns: config.repositories.map(
       (repository) => new RegExp(`^https://github\\.com/${repository.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/pull/[0-9]+$`, 'i'),
@@ -209,6 +251,110 @@ function readWorks(dbPath, config) {
   } finally {
     db.close();
   }
+}
+
+// --- needs-the-owner queue ------------------------------------------------
+
+const QUEUE_LIMIT = 100;
+const DEFERRED_CATEGORIES = [
+  { id: 'pending-approvals', label: 'Pending intent approvals' },
+  { id: 'pending-confirmations', label: 'Pending confirmations' },
+  { id: 'pending-escalations', label: 'Pending escalations' },
+  { id: 'provider-quota', label: 'Provider quota near a ceiling' },
+  { id: 'unreachable-machines', label: 'Unreachable machines' },
+];
+
+function issueLink(repository, issue) {
+  // Built from an allowlisted repository and a positive integer, never from
+  // stored text.
+  if (!REPOSITORY_PATTERN.test(repository) || !Number.isSafeInteger(issue) || issue <= 0) return null;
+  return { href: `https://github.com/${repository}/issues/${issue}`, label: 'Issue', kind: 'issue' };
+}
+
+function queueItem(row, config, nowMs) {
+  const updatedMs = typeof row.updated_at === 'string' ? Date.parse(row.updated_at) : NaN;
+  const observedMs = Number.isFinite(updatedMs) ? updatedMs : null;
+  const ageSeconds = observedMs === null ? null : Math.max(0, Math.round((nowMs - observedMs) / 1000));
+  return {
+    id: `works:${row.repo}:${row.issue}`,
+    source: 'works',
+    category: 'blocked-work',
+    repository: row.repo,
+    issue: row.issue,
+    description: safeReason(row.blocked_reason, config),
+    observed_at: observedMs === null ? null : new Date(observedMs).toISOString(),
+    age_seconds: ageSeconds,
+    age_meaning: 'source-updated',
+    first_seen: null,
+    provenance: 'ownerActionable rule on works.blocked_reason',
+    link: safePrUrl(row.pr_url, config)
+      ? { href: safePrUrl(row.pr_url, config), label: 'Pull request', kind: 'pull-request' }
+      : issueLink(row.repo, row.issue),
+    stale: ageSeconds === null ? true : ageSeconds > config.queueStaleAfterSeconds,
+  };
+}
+
+// Reads blocked work, keeps only rows an explicit configured rule marks
+// owner-actionable, and reports its own freshness, truncation and failures.
+function readQueueCategory(dbPath, config, nowMs) {
+  const base = {
+    id: 'blocked-work',
+    label: 'Blocked work',
+    source: 'works',
+    resolved_when: 'works.state leaves blocked or the ownerActionable rule stops matching',
+    limit: QUEUE_LIMIT,
+  };
+  if (!config.ownerActionableConfigured) {
+    return { ...base, status: 'rule-missing', rule_configured: false, complete: false, truncated: false, stale_items: 0, items: [] };
+  }
+  if (!dbPath) {
+    return { ...base, status: 'unavailable', rule_configured: true, complete: false, truncated: false, stale_items: 0, items: [] };
+  }
+  let rows;
+  try {
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      rows = db
+        .prepare(
+          'SELECT repo, issue, state, blocked_reason, pr_url, updated_at FROM works' +
+            " WHERE state = 'blocked' ORDER BY updated_at DESC LIMIT ?",
+        )
+        .all(QUEUE_LIMIT + 1);
+    } finally {
+      db.close();
+    }
+  } catch {
+    return { ...base, status: 'unavailable', rule_configured: true, complete: false, truncated: false, stale_items: 0, items: [] };
+  }
+
+  const truncated = rows.length > QUEUE_LIMIT;
+  const allowedRepositories = new Set(config.repositories);
+  const items = [];
+  for (const row of rows.slice(0, QUEUE_LIMIT)) {
+    if (!allowedRepositories.has(row.repo)) continue;
+    if (!Number.isSafeInteger(row.issue) || row.issue <= 0) continue;
+    if (typeof row.blocked_reason !== 'string') continue;
+    if (!config.ownerActionable.some((regex) => regex.test(row.blocked_reason))) continue;
+    items.push(queueItem(row, config, nowMs));
+  }
+  // Triage order: observations with no readable time first (their age is
+  // unknown), then the oldest observation first. Ties keep source order.
+  items.sort((a, b) => {
+    if (a.age_seconds === null && b.age_seconds !== null) return -1;
+    if (b.age_seconds === null && a.age_seconds !== null) return 1;
+    if (a.age_seconds === null) return 0;
+    return b.age_seconds - a.age_seconds;
+  });
+  const staleItems = items.filter((item) => item.stale).length;
+  return {
+    ...base,
+    status: truncated ? 'truncated' : 'ok',
+    rule_configured: true,
+    complete: !truncated,
+    truncated,
+    stale_items: staleItems,
+    items,
+  };
 }
 
 // --- HTTP -----------------------------------------------------------------
@@ -316,6 +462,19 @@ export function createDashboardServer(options = {}) {
         next: nextOffset < works.length
           ? Buffer.from(JSON.stringify({ offset: nextOffset })).toString('base64url')
           : null,
+      });
+    }
+
+    if (url.pathname === '/api/queue') {
+      if (pageParameter(url.searchParams).error) return json(res, 400, { error: 'Invalid page' });
+      const work = readQueueCategory(dbPath, config, Date.now());
+      const unavailable = work.status === 'unavailable';
+      return json(res, 200, {
+        source: unavailable ? 'unavailable' : 'available',
+        generated_at: new Date().toISOString(),
+        refresh_seconds: config.queueStaleAfterSeconds,
+        categories: [work],
+        deferred: DEFERRED_CATEGORIES.map((entry) => ({ ...entry, status: 'deferred' })),
       });
     }
 

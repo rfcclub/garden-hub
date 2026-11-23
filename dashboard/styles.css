@@ -7,6 +7,7 @@
   --text: #e6e9ef;
   --muted: #98a2b3;
   --accent: #6ea8fe;
+  --warn: #f0b86e;
 }
 
 * {
@@ -53,6 +54,44 @@ section {
   border-radius: 8px;
   padding: 0.9rem;
   overflow-x: auto;
+}
+
+/* The needs-the-owner queue is the first screen on desktop and mobile. */
+#queue {
+  grid-column: 1 / -1;
+}
+
+ul.queue {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.queue-category,
+.queue-item {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.55rem 0.7rem;
+}
+
+.queue-category {
+  background: transparent;
+}
+
+.queue-item-heading {
+  margin: 0 0 0.15rem;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.queue-item .status {
+  margin: 0.1rem 0 0;
+}
+
+.queue-item .stale {
+  color: var(--warn);
 }
 
 table {
