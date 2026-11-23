@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, watch as fsWatch, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, watch as fsWatch, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,6 +65,11 @@ export async function probeDirectoryWatch({
     await observed;
   } catch (error) {
     errors.push(error.message);
+    // The watcher never armed, so the settle and timeout timers must be
+    // disarmed here: left running they would write into the temporary
+    // directory after it is removed and append a late ENOENT to the errors.
+    for (const timer of timers) clearTimeout(timer);
+    settled?.();
   } finally {
     handle?.close?.();
     rmSync(dir, { recursive: true, force: true });
@@ -82,6 +87,21 @@ async function main() {
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Run the CLI only when invoked directly (not when imported by a test).
+// Compare realpaths so a symlinked invocation also works: argv[1] is a path
+// while import.meta.url is a file URL, and neither spelling is symlink-free.
+export function isMainInvocation(argv = process.argv, self = import.meta.url) {
+  if (!argv[1]) return false;
+  try {
+    const selfPath = self instanceof URL || String(self).startsWith('file:')
+      ? fileURLToPath(self)
+      : String(self);
+    return realpathSync(argv[1]) === realpathSync(selfPath);
+  } catch {
+    return false;
+  }
+}
+
+if (isMainInvocation()) {
   await main();
 }
