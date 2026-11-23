@@ -47,10 +47,15 @@ The configured actor does not cryptographically distinguish one client from anot
 
 ```sh
 npm install
-npm test            # event log and MCP unit tests (node --test)
-npm run test:orca   # collaboration MCP spec tests
-npm run test:wake   # wake contract tests (offline)
+npm test               # event log and MCP unit tests (node --test)
+npm run test:orca     # collaboration MCP spec tests
+npm run test:wake     # wake contract tests (offline)
+npm run probe:harness  # offline capability matrix for the harness evaluation
 ```
+
+Design notes live in [docs/](docs/). [docs/harness-evaluation.md](docs/harness-evaluation.md)
+records which execution interfaces can be supervised (issue #7) and which axes
+of that comparison are measured rather than assumed.
 
 ## Part of ANIMA
 
