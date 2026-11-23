@@ -151,6 +151,7 @@ export function createMcpServer({
   trustedCodexServer = process.env[CODEX_TRUST_ENV],
   emitNotification = (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`),
   onWakeError = (error) => process.stderr.write(`garden-hub wake failed: ${error.message}\n`),
+  watchDirectory = watch,
   github = {
     createPullRequest,
     getPullRequestSnapshot,
@@ -185,7 +186,7 @@ export function createMcpServer({
     const messagesDir = join(root, 'messages');
     try {
       mkdirSync(messagesDir, { recursive: true, mode: 0o700 });
-      watcher = watch(messagesDir, scan);
+      watcher = watchDirectory(messagesDir, scan);
       watcher.on('error', onWakeError);
       scan();
     } catch (error) {

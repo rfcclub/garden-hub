@@ -105,6 +105,35 @@ re-emits unacknowledged mail. A wake is best-effort: filesystem or notification
 errors go to stderr, and durable mail remains readable. This is not exactly-once
 delivery and does not prove that a model read or answered a message.
 
+### Host boundary
+
+Live wake is bounded by the host filesystem watcher. Some hosts accept
+`fs.watch` on the messages directory and never deliver a callback for later
+writes; Garden Hub #6 measured that on macOS arm64 with Node 22 and 26, while a
+standalone watcher failed the same way, so the limit is below this server.
+Arming a watcher is not a capability proof.
+
+On such a host the connection keeps startup and reconnect scanning but stays
+silent for live mail. That is a reported limitation, not durable-message loss:
+mail stays in the inbox and `message_inbox` still returns it. Keep the red
+acceptance result explicit instead of treating persistence as wake delivery.
+There is no polling fallback, daemon, or silent quarantine.
+
+Run the host probe before claiming live wake on a new machine:
+
+```sh
+npm run test:watch-probe
+```
+
+It writes one throwaway file into a private temporary directory and prints a
+JSON verdict (`supported`, `probeFile`, `probeWritten`, `events`, `errors`).
+Only a callback naming that written file counts: some macOS hosts emit a single
+`rename` for the watched directory while arming and then nothing, so "an event
+arrived" is not a capability proof. A non-zero exit reports
+`HOST_WATCH_BOUNDARY`. The probe is diagnostic only; it never reads the inbox
+and never changes the connection, and it is deliberately not part of
+`npm test`, which must stay green at this boundary.
+
 ## Acceptance
 
 Local tests cover contract and transport. Before archive, separately capture:
@@ -115,3 +144,8 @@ Local tests cover contract and transport. Before archive, separately capture:
 
 Keep these pending until runtime receipts exist. A process test is not a live
 conversation receipt.
+
+On a host whose probe reports `supported: false`, the live wake specs
+(`duplicate file events do not duplicate wake`, `live filesystem write wakes
+stdio`) stay red on purpose. Do not weaken or skip them; report the host
+boundary instead of counting persistence as wake delivery.

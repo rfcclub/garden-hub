@@ -1,0 +1,107 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
+import { basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { HOST_WATCH_BOUNDARY, PROBE_FILE, isMainInvocation, probeDirectoryWatch } from './ghub-watch-probe.mjs';
+
+// An inert watcher stands in for a host that arms a filesystem watcher but never
+// delivers callbacks. This half of the contract must hold on every host.
+function inertWatcher() {
+  return { on() {}, close() {} };
+}
+
+// macOS arm64 (Garden Hub #6) accepts the watcher and emits one arm-time
+// `rename` naming the watched directory itself, then stays silent for the
+// written probe file. That callback is not a wake capability proof.
+function armNoiseOnlyWatcher(path, listener) {
+  listener('rename', basename(path));
+  return { on() {}, close() {} };
+}
+
+test('WATCH-001: a watcher that never fires is reported as unsupported', async () => {
+  const result = await probeDirectoryWatch({ watcher: inertWatcher, timeoutMs: 200 });
+  assert.equal(result.supported, false);
+  assert.deepEqual(result.events, []);
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.probeFile, PROBE_FILE);
+  assert.equal(result.boundary, HOST_WATCH_BOUNDARY);
+});
+
+test('WATCH-002: a callback that does not name the probe file is unsupported', async () => {
+  const result = await probeDirectoryWatch({
+    watcher: armNoiseOnlyWatcher,
+    timeoutMs: 200,
+  });
+  assert.equal(result.supported, false, JSON.stringify(result));
+  assert.deepEqual(result.errors, []);
+  // Unrelated callbacks must not cut the probe short of its own write.
+  assert.equal(result.probeWritten, true);
+  assert.ok(result.events.length > 0);
+  assert.equal(result.events.some((event) => event.file === PROBE_FILE), false);
+});
+
+test('WATCH-003: a callback naming the probe file is supported', async () => {
+  let listener;
+  const latchWatcher = (path, onEvent) => {
+    listener = onEvent;
+    return { on() {}, close() {} };
+  };
+  const result = await probeDirectoryWatch({
+    watcher: latchWatcher,
+    writeProbe(file) {
+      writeFileSync(file, '{}\n');
+      listener('rename', basename(file));
+    },
+    timeoutMs: 200,
+  });
+  assert.equal(result.supported, true, JSON.stringify(result));
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.events, [{ event: 'rename', file: PROBE_FILE }]);
+});
+
+test('WATCH-004: host capability stays out of the default test suite', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  // The CLI verdict depends on the host; default `npm test` must not gate on it
+  // and stays green at the reported boundary (see docs/channel-wake.md).
+  assert.match(manifest.scripts['test:watch-probe'], /ghub-watch-probe\.mjs/);
+  assert.equal(manifest.scripts.test.includes('ghub-watch-probe.mjs'), false);
+  assert.match(manifest.scripts.test, /ghub-watch-probe\.test\.mjs/);
+});
+
+test('WATCH-005: a watcher that throws leaves no armed timer behind', async () => {
+  const result = await probeDirectoryWatch({
+    watcher() {
+      throw new Error('watcher unavailable');
+    },
+    timeoutMs: 100,
+  });
+  assert.equal(result.supported, false);
+  assert.deepEqual(result.errors, ['watcher unavailable']);
+  assert.equal(result.probeWritten, false);
+  // The probe already returned; a leaked timer would write into the removed
+  // temporary directory and append a late ENOENT to the returned errors.
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.deepEqual(result.errors, ['watcher unavailable']);
+});
+
+test('WATCH-006: the CLI entry guard resolves symlinked invocations', async () => {
+  const { mkdtempSync, rmSync, symlinkSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const selfPath = fileURLToPath(new URL('./ghub-watch-probe.mjs', import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), 'ghub-watch-probe-link-'));
+  try {
+    const link = join(dir, 'ghub-watch-probe.mjs');
+    symlinkSync(selfPath, link);
+    assert.equal(isMainInvocation(['node', link], selfPath), true);
+    assert.equal(isMainInvocation(['node', link], new URL('./ghub-watch-probe.mjs', import.meta.url)), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  assert.equal(isMainInvocation(['node'], selfPath), false);
+  assert.equal(isMainInvocation([], selfPath), false);
+  assert.equal(isMainInvocation(['node', '/nonexistent/probe.mjs'], selfPath), false);
+});
