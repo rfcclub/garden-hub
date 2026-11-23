@@ -23,6 +23,8 @@ function connection(dir: string, adapter = "common", actor = "codex") {
   const frames: any[] = [];
   const server = createMcpServer({
     root: dir, actor, wakeAdapter: adapter,
+    // Ops opt in to native codex ingress in the registration env.
+    trustedCodexServer: "garden-hub",
     emitNotification: (frame: any) => frames.push(frame),
   });
   cleanups.push(() => server.close?.());
@@ -117,7 +119,13 @@ test("reconnect rescans offline mail", () => {
 function stdio(dir: string, actor: string, adapter: string) {
   const proc = spawn(process.execPath, ["tools/ghub-mcp-server.mjs"], {
     cwd: process.cwd(),
-    env: { ...process.env, GHUB_MCP_STATE_DIR: dir, GHUB_MCP_ACTOR: actor, GHUB_MCP_WAKE_ADAPTER: adapter },
+    env: {
+      ...process.env,
+      GHUB_MCP_STATE_DIR: dir,
+      GHUB_MCP_ACTOR: actor,
+      GHUB_MCP_WAKE_ADAPTER: adapter,
+      GHUB_MCP_TRUSTED_CODEX_SERVER: 'garden-hub',
+    },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const frames: any[] = [];

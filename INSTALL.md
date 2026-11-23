@@ -58,7 +58,7 @@ Do not register a second conflicting `garden-hub` entry in another scope.
 | Client | Mail tools | Automatic inbox wake |
 | --- | --- | --- |
 | Claude Code | Yes, actor `claude-code` | Automatic (`claude` channel); launch with the dev-channels flag below |
-| Patched Codex candidate | Yes, actor `codex` | Automatic (`codex`); exact server name required |
+| Patched Codex candidate | Yes, actor `codex` | Opt-in (`codex`) via `GHUB_MCP_TRUSTED_CODEX_SERVER=garden-hub`; exact registered name required |
 | Stock Codex | MCP tools | Hint is sent; do not assume stock Codex acts on it |
 | OMP + bundled extension | Yes, actor `codex` | Automatic (`omp`); extension must be loaded |
 | Other stdio MCP clients | Subject to client MCP support | Automatic only if the client negotiates `common`; otherwise pull |
@@ -137,6 +137,7 @@ Keep the previous package for rollback. Register using the candidate:
   --env GHUB_MCP_ACTOR=codex \
   --env GHUB_MCP_PEERS=codex,claude-code \
   --env "GHUB_MCP_STATE_DIR=$GHUB_STATE" \
+  --env GHUB_MCP_TRUSTED_CODEX_SERVER=garden-hub \
   -- "$GHUB_NODE" "$GHUB_DIR/tools/ghub-mcp-server.mjs"
 "$GHUB_CODEX/bin/codex" mcp get garden-hub
 ```
@@ -146,6 +147,14 @@ Launch/resume the intended conversation with **that binary**. Merely running
 workstation, wait for explicit activation/restart authority; do not kill
 the current session or use an app-server to inject into a substitute thread.
 The registered name must be exactly `garden-hub`; lookalike names are denied.
+
+`GHUB_MCP_TRUSTED_CODEX_SERVER=garden-hub` is the explicit opt-in for the
+`codex/user-input` bridge. Leave it unset for pull-only mail: nothing is trusted
+by default. The env is not a security boundary by itself (the same operator sets
+it); the enforcement that follows the contract is the client side: patched Codex
+accepts `codex/user-input` only from the server it registered as exactly
+`garden-hub`. Configure the opt-in there and keep other servers off that
+allowlist.
 
 ### OMP: native MCP config plus extension
 
