@@ -188,23 +188,46 @@ function safePrUrl(value, config) {
   return config.pullRequestPatterns.some((pattern) => pattern.test(value)) ? value : null;
 }
 
-// A works page is a keyset window ordered by (updated_at, issue), so rows that
-// appear at, or leave, the top of the queue between two pages neither shift the
-// cursor nor produce duplicates. One extra row is read to learn whether a next
-// page exists.
+// A works page is a keyset window ordered by (instant, issue, rowid): the
+// instant is the numeric julianday of updated_at, so mixed offsets compare as
+// times rather than as text, rows without a timestamp (or with an unparseable
+// one) sort last, and rowid makes the key unique because an issue number
+// repeats across repositories. Rows that appear at, or leave, the top of the
+// queue between two pages neither shift the cursor nor produce duplicates. One
+// extra row is read to learn whether a next page exists.
+const WORKS_COLUMNS =
+  'SELECT rowid AS work_rowid, repo, issue, state, blocked_reason, pr_url, updated_at,' +
+  ' julianday(updated_at) AS updated_jd, COALESCE(issue, 0) AS sort_issue FROM works';
+const WORKS_ORDER =
+  'ORDER BY (updated_jd IS NULL), updated_jd DESC, sort_issue DESC, rowid DESC';
+
+// Rows strictly after the cursor row in WORKS_ORDER. Rows without a usable
+// instant come last, so every one of them is reachable once the cursor instant
+// is set. Parameters are bound in WORKS_ORDER order.
+function worksAfterCursor(after) {
+  if (after.instant === null) {
+    return {
+      where: 'updated_jd IS NULL AND (sort_issue < ? OR (sort_issue = ? AND rowid < ?))',
+      params: [after.issue, after.issue, after.rowid],
+    };
+  }
+  return {
+    where:
+      '((updated_jd IS NOT NULL AND (updated_jd < ? OR (updated_jd = ? AND (sort_issue < ?' +
+      ' OR (sort_issue = ? AND rowid < ?))))) OR updated_jd IS NULL)',
+    params: [after.instant, after.instant, after.issue, after.issue, after.rowid],
+  };
+}
+
 function readWorks(dbPath, config, { limit, after }) {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
-    const columns = 'SELECT repo, issue, state, blocked_reason, pr_url, updated_at FROM works';
-    const order = 'ORDER BY updated_at DESC, issue DESC';
-    const statement = after
-      ? db.prepare(
-          `${columns} WHERE state = 'blocked' AND (updated_at < ? OR (updated_at = ? AND issue < ?))` +
-            ` ${order} LIMIT ?`,
-        )
-      : db.prepare(`${columns} WHERE state = 'blocked' ${order} LIMIT ?`);
-    const rows = after
-      ? statement.all(after.updated_at, after.updated_at, after.issue, limit + 1)
+    const condition = after ? worksAfterCursor(after) : null;
+    const statement = condition
+      ? db.prepare(`${WORKS_COLUMNS} WHERE state = 'blocked' AND ${condition.where} ${WORKS_ORDER} LIMIT ?`)
+      : db.prepare(`${WORKS_COLUMNS} WHERE state = 'blocked' ${WORKS_ORDER} LIMIT ?`);
+    const rows = condition
+      ? statement.all(...condition.params, limit + 1)
       : statement.all(limit + 1);
     const visible = rows.slice(0, limit);
     const works = visible.map((row) => {
@@ -219,13 +242,19 @@ function readWorks(dbPath, config, { limit, after }) {
       };
     });
     const last = visible[visible.length - 1];
-    // The cursor must be a usable keyset: a row whose timestamp or issue number
-    // cannot be compared ends the page rather than producing a broken cursor.
+    // The cursor must be a usable keyset: a row whose ordering values cannot be
+    // compared ends the page rather than producing a cursor that the next
+    // request would reject.
     const usable =
-      last !== undefined && typeof last.updated_at === 'string' && Number.isSafeInteger(last.issue);
+      last !== undefined &&
+      Number.isSafeInteger(last.sort_issue) &&
+      Number.isSafeInteger(last.work_rowid) &&
+      (last.updated_jd === null || Number.isFinite(last.updated_jd));
     return {
       works,
-      next: rows.length > limit && usable ? { updated_at: last.updated_at, issue: last.issue } : null,
+      next: rows.length > limit && usable
+        ? { instant: last.updated_jd ?? null, issue: last.sort_issue, rowid: last.work_rowid }
+        : null,
     };
   } finally {
     db.close();
@@ -251,8 +280,13 @@ function pageParameter(searchParams) {
   return { limit: Number(limitText), cursor };
 }
 
+// The cursor carries only the ordering values of the last row shown, never a
+// repository name, so a name that is neutralised in the payload is not leaked
+// through the opaque cursor either.
 function encodeWorksCursor(key) {
-  return Buffer.from(JSON.stringify({ updated_at: key.updated_at, issue: key.issue })).toString('base64url');
+  return Buffer.from(
+    JSON.stringify({ instant: key.instant, issue: key.issue, rowid: key.rowid }),
+  ).toString('base64url');
 }
 
 function readWorksCursor(cursor) {
@@ -263,9 +297,11 @@ function readWorksCursor(cursor) {
   } catch {
     return undefined;
   }
-  if (!decoded || typeof decoded.updated_at !== 'string' || decoded.updated_at.length > 64) return undefined;
-  if (!Number.isSafeInteger(decoded.issue)) return undefined;
-  return { updated_at: decoded.updated_at, issue: decoded.issue };
+  if (!decoded || typeof decoded !== 'object') return undefined;
+  const instant = decoded.instant;
+  if (instant !== null && (typeof instant !== 'number' || !Number.isFinite(instant))) return undefined;
+  if (!Number.isSafeInteger(decoded.issue) || !Number.isSafeInteger(decoded.rowid)) return undefined;
+  return { instant, issue: decoded.issue, rowid: decoded.rowid };
 }
 
 export function createDashboardServer(options = {}) {

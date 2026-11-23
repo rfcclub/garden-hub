@@ -53,7 +53,7 @@ function worksDb(rows) {
   const db = new DatabaseSync(path);
   db.exec(
     'CREATE TABLE works (repo TEXT NOT NULL, issue INTEGER NOT NULL, state TEXT NOT NULL,' +
-      ' blocked_reason TEXT, pr_url TEXT, updated_at TEXT NOT NULL)',
+      ' blocked_reason TEXT, pr_url TEXT, updated_at TEXT)',
   );
   const insert = db.prepare(
     'INSERT INTO works (repo, issue, state, blocked_reason, pr_url, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
@@ -355,6 +355,91 @@ test('DASH-010: the works cursor survives rows leaving the blocked queue', async
     assert.equal(second.source, 'available');
     assert.deepEqual(second.works.map((work) => work.issue), [1]);
     assert.equal(second.next, null);
+  });
+});
+
+// Walks every page of /api/works and returns the pages in order.
+async function worksPages(socketPath, limit) {
+  const pages = [];
+  let cursor = null;
+  for (let guard = 0; guard < 50; guard += 1) {
+    const query = cursor === null ? `?limit=${limit}` : `?limit=${limit}&cursor=${cursor}`;
+    const page = JSON.parse((await get(socketPath, `/api/works${query}`)).body);
+    assert.equal(page.source, 'available');
+    pages.push(page);
+    if (page.next === null) return pages;
+    cursor = page.next;
+  }
+  throw new Error('works pagination did not terminate');
+}
+
+test('DASH-012: rows sharing a timestamp and issue across repositories are never skipped', async () => {
+  const rows = [];
+  for (let index = 1; index <= 7; index += 1) {
+    for (let issue = 1; issue <= 13; issue += 1) {
+      rows.push(
+        workRow({ repo: `org-${index}/repo-${index}`, issue, updated_at: '2026-10-13T12:00:00.000Z' }),
+      );
+    }
+  }
+  const dbPath = worksDb(rows);
+  // The repositories are configured so the neutral label does not collapse
+  // seven repositories into one and hide a skipped row.
+  const config = { repositories: Array.from({ length: 7 }, (_, index) => `org-${index + 1}/repo-${index + 1}`) };
+  await withServer({ config, dbPath }, async ({ socketPath }) => {
+    const shown = (await worksPages(socketPath, 10)).flatMap((page) => page.works);
+    assert.equal(shown.length, rows.length);
+    assert.equal(shown.filter((work) => work.issue === 12).length, 7);
+    const unique = new Set(shown.map((work) => `${work.repository}|${work.issue}`));
+    assert.equal(unique.size, rows.length);
+  });
+});
+
+test('DASH-013: mixed timestamp offsets are ordered by instant, not by text', async () => {
+  const dbPath = worksDb([
+    workRow({ issue: 1, updated_at: '2026-10-13T12:00:00.000Z' }),
+    workRow({ issue: 2, updated_at: '2026-10-13T13:00:00+02:00' }),
+  ]);
+  await withServer({ dbPath }, async ({ socketPath }) => {
+    const page = JSON.parse((await get(socketPath, '/api/works')).body);
+    assert.deepEqual(page.works.map((work) => work.issue), [1, 2]);
+    assert.deepEqual(page.works.map((work) => work.updated_at), [
+      '2026-10-13T12:00:00.000Z',
+      '2026-10-13T11:00:00.000Z',
+    ]);
+    const walked = (await worksPages(socketPath, 1)).flatMap((each) => each.works);
+    assert.deepEqual(walked.map((work) => work.issue), [1, 2]);
+  });
+});
+
+test('DASH-014: a row without an updated_at timestamp is still reachable after page one', async () => {
+  const dbPath = worksDb([
+    workRow({ issue: 1, updated_at: '2026-10-13T12:00:00.000Z' }),
+    workRow({ issue: 2, updated_at: null }),
+  ]);
+  await withServer({ dbPath }, async ({ socketPath }) => {
+    const shown = (await worksPages(socketPath, 1)).flatMap((page) => page.works);
+    assert.deepEqual(shown.map((work) => work.issue), [1, 2]);
+    assert.equal(shown[1].updated_at, null);
+  });
+});
+
+test('DASH-015: one-row pages reach a tie across repositories and an undated row', async () => {
+  const dbPath = worksDb([
+    workRow({ repo: 'org1/repo1', issue: 12, updated_at: '2026-10-13T12:00:00.000Z' }),
+    workRow({ repo: 'org2/repo2', issue: 12, updated_at: '2026-10-13T12:00:00.000Z' }),
+    workRow({ repo: 'org3/repo3', issue: 12, updated_at: null }),
+  ]);
+  await withServer({ dbPath }, async ({ socketPath }) => {
+    const pages = await worksPages(socketPath, 1);
+    assert.equal(pages.length, 3);
+    const shown = pages.flatMap((page) => page.works);
+    assert.equal(shown.length, 3);
+    assert.deepEqual(shown.map((work) => work.issue), [12, 12, 12]);
+    assert.equal(shown[2].updated_at, null);
+    for (const page of pages) {
+      assert.doesNotMatch(JSON.stringify(page.next), /repo1|repo2|repo3/);
+    }
   });
 });
 

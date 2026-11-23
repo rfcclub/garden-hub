@@ -101,7 +101,7 @@ The dashboard only reads, and only from `works`:
 | `pr_url` | TEXT | Returned only when it is `https://github.com/<owner>/<name>/pull/<number>` for a configured repository; the host is always `github.com` and any other host yields `null` |
 | `updated_at` | TEXT | ISO-8601 timestamp used for ordering and display |
 
-Rows are selected with `WHERE state = 'blocked' ORDER BY updated_at DESC, issue DESC`, one bounded page at a time. The page cursor is a keyset over `(updated_at, issue)` of the last row shown, so rows that enter or leave the blocked queue between two pages neither hide a row nor show a duplicate. Any other table in that database is ignored.
+Rows are selected with `WHERE state = 'blocked'`, ordered newest first by the instant of `updated_at` (`julianday(updated_at)`, so timestamps with mixed offsets compare as times rather than as text), then issue number, then the row's `rowid`. Rows whose `updated_at` is missing or unparseable sort last and are still reachable. The page cursor is a keyset over that whole ordering of the last row shown, so rows that enter or leave the blocked queue between two pages neither hide a row nor show a duplicate; the cursor is opaque and carries no repository name. Any other table in that database is ignored.
 
 ## Tests
 
