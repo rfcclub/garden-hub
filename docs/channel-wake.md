@@ -99,9 +99,13 @@ npm run test:watch-probe
 ```
 
 It writes one throwaway file into a private temporary directory and prints a
-JSON verdict (`supported`, `events`, `errors`). A non-zero exit reports
+JSON verdict (`supported`, `probeFile`, `probeWritten`, `events`, `errors`).
+Only a callback naming that written file counts: some macOS hosts emit a single
+`rename` for the watched directory while arming and then nothing, so "an event
+arrived" is not a capability proof. A non-zero exit reports
 `HOST_WATCH_BOUNDARY`. The probe is diagnostic only; it never reads the inbox
-and never changes the connection.
+and never changes the connection, and it is deliberately not part of
+`npm test`, which must stay green at this boundary.
 
 ## Acceptance
 

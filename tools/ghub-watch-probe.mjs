@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync, watch as fsWatch, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Channel wake is bounded by the host's filesystem watcher. Arming a watcher
@@ -10,17 +10,28 @@ export const HOST_WATCH_BOUNDARY =
   'where callbacks never arrive a live connection stays silent, ' +
   'so mail must be read with message_inbox';
 
+export const PROBE_FILE = 'probe.json';
+
+function namesProbe(record) {
+  return record.file !== null && basename(record.file) === PROBE_FILE;
+}
+
 // Writes one probe file into a private temporary directory and reports whether
-// the host delivered any callback for it. The watcher implementation is
-// injectable so the "armed but never fires" half is testable everywhere.
+// the host delivered a callback naming that file. Unrelated callbacks do not
+// count: macOS arm64 (Garden Hub #6) emits a single arm-time `rename` for the
+// watched directory itself and then nothing for later writes, which would
+// otherwise read as a capability proof. The watcher and the write are
+// injectable so both halves are testable everywhere.
 export async function probeDirectoryWatch({
   watcher = (path, listener) => fsWatch(path, listener),
+  writeProbe = (file) => writeFileSync(file, '{}\n'),
   timeoutMs = 2000,
   settleMs = 25,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ghub-watch-probe-'));
   const events = [];
   const errors = [];
+  let probeWritten = false;
   let handle;
   let settled;
   const timers = [];
@@ -33,7 +44,8 @@ export async function probeDirectoryWatch({
       settled = resolve;
       timers.push(setTimeout(() => {
         try {
-          writeFileSync(join(dir, 'probe.json'), '{}\n');
+          writeProbe(join(dir, PROBE_FILE));
+          probeWritten = true;
         } catch (error) {
           errors.push(error.message);
           finish();
@@ -42,8 +54,9 @@ export async function probeDirectoryWatch({
       timers.push(setTimeout(finish, timeoutMs));
     });
     handle = watcher(dir, (event, file) => {
-      events.push({ event, file: typeof file === 'string' ? file : null });
-      finish();
+      const record = { event, file: typeof file === 'string' ? file : null };
+      events.push(record);
+      if (namesProbe(record)) finish();
     });
     handle.on?.('error', (error) => {
       errors.push(error.message);
@@ -56,7 +69,8 @@ export async function probeDirectoryWatch({
     handle?.close?.();
     rmSync(dir, { recursive: true, force: true });
   }
-  return { supported: events.length > 0, events, errors, boundary: HOST_WATCH_BOUNDARY };
+  const supported = probeWritten && events.some(namesProbe);
+  return { supported, probeFile: PROBE_FILE, probeWritten, events, errors, boundary: HOST_WATCH_BOUNDARY };
 }
 
 async function main() {
