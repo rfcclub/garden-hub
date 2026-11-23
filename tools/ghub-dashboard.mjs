@@ -13,7 +13,9 @@
 // Columns read from the works table:
 //   repo TEXT, issue INTEGER, state TEXT, blocked_reason TEXT,
 //   pr_url TEXT, updated_at TEXT
-// Only rows with state = 'blocked' are read, newest updated_at first.
+// Only rows with state = 'blocked' are read, newest updated_at first, one
+// bounded keyset page at a time. A pull-request URL is returned only when it is
+// https://github.com/<owner>/<name>/pull/<number> for a configured repository.
 
 import { createServer } from 'node:http';
 import { readFileSync, realpathSync } from 'node:fs';
@@ -186,16 +188,26 @@ function safePrUrl(value, config) {
   return config.pullRequestPatterns.some((pattern) => pattern.test(value)) ? value : null;
 }
 
-function readWorks(dbPath, config) {
+// A works page is a keyset window ordered by (updated_at, issue), so rows that
+// appear at, or leave, the top of the queue between two pages neither shift the
+// cursor nor produce duplicates. One extra row is read to learn whether a next
+// page exists.
+function readWorks(dbPath, config, { limit, after }) {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
-    const rows = db
-      .prepare(
-        'SELECT repo, issue, state, blocked_reason, pr_url, updated_at FROM works' +
-          " WHERE state = 'blocked' ORDER BY updated_at DESC LIMIT 100",
-      )
-      .all();
-    return rows.map((row) => {
+    const columns = 'SELECT repo, issue, state, blocked_reason, pr_url, updated_at FROM works';
+    const order = 'ORDER BY updated_at DESC, issue DESC';
+    const statement = after
+      ? db.prepare(
+          `${columns} WHERE state = 'blocked' AND (updated_at < ? OR (updated_at = ? AND issue < ?))` +
+            ` ${order} LIMIT ?`,
+        )
+      : db.prepare(`${columns} WHERE state = 'blocked' ${order} LIMIT ?`);
+    const rows = after
+      ? statement.all(after.updated_at, after.updated_at, after.issue, limit + 1)
+      : statement.all(limit + 1);
+    const visible = rows.slice(0, limit);
+    const works = visible.map((row) => {
       const updatedMs = typeof row.updated_at === 'string' ? Date.parse(row.updated_at) : NaN;
       return {
         repository: labelFor(row.repo, config.repositoryLabels, NEUTRAL.repository),
@@ -206,6 +218,15 @@ function readWorks(dbPath, config) {
         updated_at: Number.isFinite(updatedMs) ? new Date(updatedMs).toISOString() : null,
       };
     });
+    const last = visible[visible.length - 1];
+    // The cursor must be a usable keyset: a row whose timestamp or issue number
+    // cannot be compared ends the page rather than producing a broken cursor.
+    const usable =
+      last !== undefined && typeof last.updated_at === 'string' && Number.isSafeInteger(last.issue);
+    return {
+      works,
+      next: rows.length > limit && usable ? { updated_at: last.updated_at, issue: last.issue } : null,
+    };
   } finally {
     db.close();
   }
@@ -230,16 +251,21 @@ function pageParameter(searchParams) {
   return { limit: Number(limitText), cursor };
 }
 
+function encodeWorksCursor(key) {
+  return Buffer.from(JSON.stringify({ updated_at: key.updated_at, issue: key.issue })).toString('base64url');
+}
+
 function readWorksCursor(cursor) {
-  if (cursor === null) return 0;
+  if (cursor === null) return null;
   let decoded;
   try {
     decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
   } catch {
-    return null;
+    return undefined;
   }
-  if (!decoded || !Number.isSafeInteger(decoded.offset) || decoded.offset < 0) return null;
-  return decoded.offset;
+  if (!decoded || typeof decoded.updated_at !== 'string' || decoded.updated_at.length > 64) return undefined;
+  if (!Number.isSafeInteger(decoded.issue)) return undefined;
+  return { updated_at: decoded.updated_at, issue: decoded.issue };
 }
 
 export function createDashboardServer(options = {}) {
@@ -299,23 +325,19 @@ export function createDashboardServer(options = {}) {
     if (url.pathname === '/api/works') {
       const page = pageParameter(url.searchParams);
       if (page.error) return json(res, 400, { error: 'Invalid page' });
-      const offset = readWorksCursor(page.cursor);
-      if (offset === null) return json(res, 400, { error: 'Invalid page' });
+      const after = readWorksCursor(page.cursor);
+      if (after === undefined) return json(res, 400, { error: 'Invalid page' });
       if (!dbPath) return json(res, 200, { source: 'unavailable', works: [] });
-      let works;
+      let result;
       try {
-        works = readWorks(dbPath, config);
+        result = readWorks(dbPath, config, { limit: page.limit, after });
       } catch {
         return json(res, 200, { source: 'unavailable', works: [] });
       }
-      const visible = works.slice(offset, offset + page.limit);
-      const nextOffset = offset + page.limit;
       return json(res, 200, {
         source: 'available',
-        works: visible,
-        next: nextOffset < works.length
-          ? Buffer.from(JSON.stringify({ offset: nextOffset })).toString('base64url')
-          : null,
+        works: result.works,
+        next: result.next ? encodeWorksCursor(result.next) : null,
       });
     }
 

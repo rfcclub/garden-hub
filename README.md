@@ -83,7 +83,7 @@ The file is validated when the server starts: wrong types, an invalid regular ex
 ### Endpoints
 
 - `GET /api/events?limit=60&cursor=...` - bounded pages of the event log, newest first. Only `ts`, `type`, `agent` and `project` cross the boundary; event payloads are never returned.
-- `GET /api/works?limit=60&cursor=...` - bounded pages of blocked work, newest first.
+- `GET /api/works?limit=60&cursor=...` - bounded pages of blocked work, newest first. The cursor is a keyset over the last row shown, so a queue that changes between pages neither hides nor repeats a row.
 - `GET /`, `/app.js`, `/styles.css` - the static page and its assets.
 
 Safety properties: the server binds IPv4 loopback only; `Host` and `Origin` must be loopback; only `GET` is accepted; responses carry a restrictive `Content-Security-Policy`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`; pagination is bounded; and unknown paths return a plain 404 without reading files outside `dashboard/`.
@@ -98,10 +98,10 @@ The dashboard only reads, and only from `works`:
 | `issue` | INTEGER | Issue number; a non-positive or non-integer value becomes `null` |
 | `state` | TEXT | Only rows with `state = 'blocked'` are selected |
 | `blocked_reason` | TEXT | Matched against `blockedReasons` |
-| `pr_url` | TEXT | Returned only when it is `https://<host>/<owner>/<name>/pull/<number>` for a configured repository |
+| `pr_url` | TEXT | Returned only when it is `https://github.com/<owner>/<name>/pull/<number>` for a configured repository; the host is always `github.com` and any other host yields `null` |
 | `updated_at` | TEXT | ISO-8601 timestamp used for ordering and display |
 
-Rows are selected with `WHERE state = 'blocked' ORDER BY updated_at DESC LIMIT 100`. Any other table in that database is ignored.
+Rows are selected with `WHERE state = 'blocked' ORDER BY updated_at DESC, issue DESC`, one bounded page at a time. The page cursor is a keyset over `(updated_at, issue)` of the last row shown, so rows that enter or leave the blocked queue between two pages neither hide a row nor show a duplicate. Any other table in that database is ignored.
 
 ## Tests
 

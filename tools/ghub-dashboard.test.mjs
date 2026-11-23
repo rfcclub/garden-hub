@@ -65,8 +65,24 @@ function worksDb(rows) {
   return path;
 }
 
-function workRow({ repo = SECRET_REPO, issue = 8, state = 'blocked', blocked_reason = SECRET_REASON, pr_url = null } = {}) {
-  return { repo, issue, state, blocked_reason, pr_url, updated_at: '2026-10-13T12:00:00.000Z' };
+function workRow({
+  repo = SECRET_REPO,
+  issue = 8,
+  state = 'blocked',
+  blocked_reason = SECRET_REASON,
+  pr_url = null,
+  updated_at = '2026-10-13T12:00:00.000Z',
+} = {}) {
+  return { repo, issue, state, blocked_reason, pr_url, updated_at };
+}
+
+function changeWorksDb(path, statement, ...params) {
+  const db = new DatabaseSync(path);
+  try {
+    db.prepare(statement).run(...params);
+  } finally {
+    db.close();
+  }
 }
 
 const CONFIG = {
@@ -201,16 +217,18 @@ test('DASH-005: only a pull-request URL of a configured repository is returned',
     workRow({ issue: 8, pr_url: `https://github.com/${SECRET_REPO}/pull/8` }),
     { ...workRow({ issue: 9, repo: OTHER_REPO }), pr_url: `https://github.com/${OTHER_REPO}/pull/9` },
     workRow({ issue: 10, pr_url: `https://github.com/${SECRET_REPO}/issues/10` }),
+    workRow({ issue: 11, pr_url: `https://gitlab.example/${SECRET_REPO}/pull/11` }),
   ]);
   await withServer({ config: CONFIG, dbPath }, async ({ socketPath }) => {
     const body = (await get(socketPath, '/api/works')).body;
     assert.equal(body.includes(OTHER_REPO), false);
     assert.equal(body.includes('/issues/10'), false);
+    assert.equal(body.includes('gitlab.example'), false);
     const page = JSON.parse(body);
-    assert.equal(page.works.length, 3);
+    assert.equal(page.works.length, 4);
     assert.deepEqual(
       page.works.map((work) => work.pr_url).sort(),
-      [null, null, `https://github.com/${SECRET_REPO}/pull/8`].sort(),
+      [null, null, null, `https://github.com/${SECRET_REPO}/pull/8`].sort(),
     );
     const kept = page.works.find((work) => work.pr_url);
     assert.equal(kept.reason, 'Needs an owner');
@@ -315,4 +333,52 @@ test('DASH-009: a configuration file is loaded and validated', () => {
   const badRepo = join(dir, 'bad-repo.json');
   writeFileSync(badRepo, JSON.stringify({ repositories: ['not-a-repository'] }));
   assert.throws(() => loadConfigFile(badRepo), /repositories/);
+});
+
+test('DASH-010: the works cursor survives rows leaving the blocked queue', async () => {
+  const dbPath = worksDb([
+    workRow({ issue: 1, updated_at: '2026-10-13T10:00:00.000Z' }),
+    workRow({ issue: 2, updated_at: '2026-10-13T11:00:00.000Z' }),
+    workRow({ issue: 3, updated_at: '2026-10-13T12:00:00.000Z' }),
+  ]);
+  await withServer({ dbPath }, async ({ socketPath }) => {
+    const first = JSON.parse((await get(socketPath, '/api/works?limit=2')).body);
+    assert.deepEqual(first.works.map((work) => work.issue), [3, 2]);
+    assert.equal(typeof first.next, 'string');
+
+    // The newest blocked row stops being blocked between the two pages.
+    changeWorksDb(dbPath, "UPDATE works SET state = 'done' WHERE issue = 3");
+
+    const second = JSON.parse(
+      (await get(socketPath, `/api/works?limit=2&cursor=${first.next}`)).body,
+    );
+    assert.equal(second.source, 'available');
+    assert.deepEqual(second.works.map((work) => work.issue), [1]);
+    assert.equal(second.next, null);
+  });
+});
+
+test('DASH-011: the works cursor never duplicates a row that arrives at the top', async () => {
+  const dbPath = worksDb([
+    workRow({ issue: 1, updated_at: '2026-10-13T10:00:00.000Z' }),
+    workRow({ issue: 2, updated_at: '2026-10-13T11:00:00.000Z' }),
+    workRow({ issue: 3, updated_at: '2026-10-13T12:00:00.000Z' }),
+  ]);
+  await withServer({ dbPath }, async ({ socketPath }) => {
+    const first = JSON.parse((await get(socketPath, '/api/works?limit=2')).body);
+    assert.deepEqual(first.works.map((work) => work.issue), [3, 2]);
+
+    changeWorksDb(
+      dbPath,
+      "INSERT INTO works (repo, issue, state, blocked_reason, pr_url, updated_at) VALUES (?, 4, 'blocked', ?, NULL, '2026-10-13T13:00:00.000Z')",
+      SECRET_REPO,
+      SECRET_REASON,
+    );
+
+    const second = JSON.parse(
+      (await get(socketPath, `/api/works?limit=2&cursor=${first.next}`)).body,
+    );
+    assert.deepEqual(second.works.map((work) => work.issue), [1]);
+    assert.equal(second.next, null);
+  });
 });
