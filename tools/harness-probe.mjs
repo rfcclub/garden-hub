@@ -22,6 +22,7 @@
 // Run: node tools/harness-probe.mjs
 
 import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 
 const FIXTURES = new URL('../tests/harness-evaluation/fixtures/', import.meta.url);
 
@@ -79,17 +80,28 @@ export const CANDIDATES = [
   },
 ];
 
-const ENTRY = /^\s{2,}(?:-[A-Za-z],\s+)?(--[A-Za-z0-9-]+)/;
+// A flag line in clap's layout is indented 2-7 spaces (2 for short+long, 6 for
+// long-only). Wrapped description text is indented further and frequently
+// mentions another flag, e.g. `--output-format=stream-json)`; matching only the
+// flag-line indent, and requiring a delimiter after the name, keeps those from
+// being parsed as entries that wipe the real flag's choices.
+const ENTRY = /^ {2,7}(?:-[A-Za-z],\s+)?(--[A-Za-z0-9-]+)(?=\s|=|<|\[|$)/;
 const CHOICES = /\(choices:\s*([^)]*)\)/g;
 const QUOTED = /"([^"]+)"/g;
 
-// Parse a `--help` page into its documented flags, the enumerated values it
-// offers, and the permission modes it accepts. Claude Code and `codex exec`
-// both use clap's layout, so one parser covers the fixture for each.
+// Parse a `--help` page into its documented flags, the enumerated values each
+// flag offers, and the permission modes it accepts. Claude Code and `codex
+// exec` both use clap's layout, so one parser covers the fixture for each.
+//
+// Choices are kept per flag in `entryValues`; `values` is only the union, for
+// callers that ask "is this value documented anywhere". A capability check must
+// use `entryValues.get(flag)` so that one flag's choices cannot satisfy a
+// check written against another flag.
 export function readClaudeHelp(text) {
   const flags = new Set();
   const values = new Set();
   const entries = new Map();
+  const entryValues = new Map();
   let current = null;
 
   for (const line of text.split('\n')) {
@@ -98,14 +110,18 @@ export function readClaudeHelp(text) {
       current = match[1];
       flags.add(current);
       entries.set(current, line.trim());
+      entryValues.set(current, new Set());
     } else if (current) {
       entries.set(current, `${entries.get(current)} ${line.trim()}`.trim());
     }
   }
 
-  for (const entry of entries.values()) {
+  for (const [flag, entry] of entries) {
     for (const group of entry.matchAll(CHOICES)) {
-      for (const value of group[1].matchAll(QUOTED)) values.add(value[1]);
+      for (const value of group[1].matchAll(QUOTED)) {
+        values.add(value[1]);
+        entryValues.get(flag).add(value[1]);
+      }
     }
   }
 
@@ -116,7 +132,14 @@ export function readClaudeHelp(text) {
     if (group) for (const value of group[1].matchAll(QUOTED)) permissionModes.push(value[1]);
   }
 
-  return { flags, values, permissionModes, entries };
+  return { flags, values, entryValues, permissionModes, entries };
+}
+
+// Does `flag` document `value` among its own choices? Deliberately scoped to
+// the flag: `--input-format ... stream-json` must not imply that
+// `--output-format` offers it.
+export function flagOffers(help, flag, value) {
+  return help.entryValues?.get(flag)?.has(value) ?? false;
 }
 
 // Reduce a `codex app-server generate-json-schema` bundle to the three method
@@ -152,10 +175,12 @@ export function readCodexMethods(bundle) {
   };
 }
 
-// `claude --help` does not list the background-session subcommands, so the
-// interrupt and reconnect controls had to be recorded separately. These are
-// the real ones: `stop <id>` interrupts, `attach <id>` reconnects, and
-// `stop --help` states the conversation is kept for the later attach.
+// `claude --help` does list the background-session subcommands (`attach`, and
+// `stop|kill`), but a top-level listing does not establish what they do, and it
+// does not overrule a missing `--resume`. Their own `--help` pages were
+// therefore recorded separately: `stop <id>` interrupts, `attach <id>`
+// reconnects, and `stop --help` states the conversation is kept for the later
+// attach.
 export function readClaudeLifecycle({ stopHelp = '', attachHelp = '' }) {
   return {
     stop: /^Usage:\s+claude stop\b/m.test(stopHelp),
@@ -166,22 +191,38 @@ export function readClaudeLifecycle({ stopHelp = '', attachHelp = '' }) {
 
 const yesNo = (ok) => (ok ? 'yes' : 'no');
 
-// Derive the capability matrix from the recorded surfaces. The `codexExec`
-// column cannot be derived here (that fixture is a separate help page), so it
-// is stated with the reason the CLI gives for each control.
-export function capabilityRows({ claudeHelp, codexMethods, claudeLifecycle: lifecycle = {} }) {
-  const { flags, values } = claudeHelp;
+// Derive the capability matrix from the recorded surfaces. Every column comes
+// from a fixture: `claudeHelp` and `codexExecHelp` are parsed `--help` pages,
+// `codexMethods` is the reduced app-server schema, and `claudeLifecycle` is the
+// two recorded subcommand help pages. `unknown` is returned when a fixture was
+// not supplied, so a caller cannot get a silent "no" from a missing input.
+export function capabilityRows({
+  claudeHelp,
+  codexMethods,
+  codexExecHelp,
+  claudeLifecycle: lifecycle = {},
+}) {
+  const { flags } = claudeHelp;
   const client = codexMethods.client;
   const notification = codexMethods.notification;
   const request = codexMethods.request;
-  const structuredStdout = flags.has('--output-format') && values.has('stream-json');
-  const structuredStdin = flags.has('--input-format') && values.has('stream-json');
+  const structuredStdout = flags.has('--output-format') && flagOffers(claudeHelp, '--output-format', 'stream-json');
+  const structuredStdin = flags.has('--input-format') && flagOffers(claudeHelp, '--input-format', 'stream-json');
+
+  const exec = codexExecHelp?.flags;
+  const execRuns = yesNo(exec ? exec.size > 0 : false);
+  const execJson = yesNo(exec?.has('--json') ?? false);
+  const execAnswer = yesNo(exec?.has('--input-format') ?? false);
+  const execApprove = yesNo(exec?.has('--permission-prompt-tool') ?? false);
+  const execInterrupt = yesNo(exec?.has('--interrupt') ?? false);
+  const execResume = yesNo(exec?.has('--resume') ?? false);
+  const execSchema = yesNo(exec?.has('--output-schema') ?? false);
 
   const rows = {
     'start-work': {
       claudeCode: yesNo(flags.has('--print')),
       codexAppServer: yesNo(client.has('thread/start') && client.has('turn/start')),
-      codexExec: 'yes',
+      codexExec: execRuns,
       evidence: {
         claudeCode: '-p, --print',
         codexAppServer: 'ClientRequest: thread/start, turn/start',
@@ -191,21 +232,27 @@ export function capabilityRows({ claudeHelp, codexMethods, claudeLifecycle: life
     'tool-activity': {
       claudeCode: yesNo(structuredStdout),
       codexAppServer: yesNo(notification.has('item/started') && notification.has('item/completed')),
-      codexExec: 'partial',
+      // JSONL items are a stream, not a queryable state, so this is the best
+      // the exec path can be even with --json.
+      codexExec: execJson === 'yes' ? 'partial' : 'no',
       evidence: {
         claudeCode: '--output-format stream-json',
         codexAppServer: 'ServerNotification: item/started, item/completed, item/commandExecution/outputDelta',
-        codexExec: '--json prints items as JSONL; output is a stream, not a queryable state',
+        codexExec: execJson === 'yes'
+          ? '--json prints items as JSONL; output is a stream, not a queryable state'
+          : 'no --json: nothing is streamed as events',
       },
     },
     'answer-question': {
       claudeCode: yesNo(structuredStdin),
       codexAppServer: yesNo(request.has('item/tool/requestUserInput')),
-      codexExec: 'no',
+      codexExec: execAnswer,
       evidence: {
         claudeCode: '--input-format stream-json (host answers over control stdin)',
         codexAppServer: 'ServerRequest: item/tool/requestUserInput',
-        codexExec: 'no server-request channel in the exec subcommand',
+        codexExec: execAnswer === 'yes'
+          ? '--input-format on the exec path'
+          : 'no server-request channel in the exec subcommand',
       },
     },
     'approve-permission': {
@@ -218,45 +265,54 @@ export function capabilityRows({ claudeHelp, codexMethods, claudeLifecycle: life
           || request.has('item/fileChange/requestApproval')
           || request.has('item/permissions/requestApproval'),
       ),
-      codexExec: 'no',
+      codexExec: execApprove,
       evidence: {
         claudeCode: '--permission-prompts host|none (a host must answer; -p alone does not prompt)',
         codexAppServer: 'ServerRequest: item/{commandExecution,fileChange,permissions}/requestApproval',
-        codexExec: 'only --dangerously-bypass-approvals-and-sandbox, i.e. no per-call answer',
+        codexExec: execApprove === 'yes'
+          ? '--permission-prompt-tool on the exec path'
+          : 'only --dangerously-bypass-approvals-and-sandbox, i.e. no per-call answer',
       },
     },
     interrupt: {
       claudeCode: yesNo(lifecycle.stop || structuredStdin),
       codexAppServer: yesNo(client.has('turn/interrupt')),
-      codexExec: 'no',
+      codexExec: execInterrupt,
       evidence: {
         claudeCode: lifecycle.stop
           ? 'claude stop <id> (stops a running session)'
           : 'control stdin of --input-format stream-json',
         codexAppServer: 'ClientRequest: turn/interrupt',
-        codexExec: 'no interrupt method on the exec path',
+        codexExec: execInterrupt === 'yes'
+          ? '--interrupt on the exec path'
+          : 'no interrupt method on the exec path',
       },
     },
     reconnect: {
       claudeCode: yesNo((flags.has('--resume') && flags.has('--session-id')) || lifecycle.attach),
       codexAppServer: yesNo(client.has('thread/resume')),
-      codexExec: 'no',
+      codexExec: execResume,
       evidence: {
         claudeCode: lifecycle.attach
           ? 'claude attach <id> (reopens a stopped session); -r, --resume and --session-id'
           : '-r, --resume and --session-id',
         codexAppServer: 'ClientRequest: thread/resume',
-        codexExec: 'resume exists as a separate subcommand, not a reconnect of a live turn',
+        codexExec: execResume === 'yes'
+          ? '--resume on the exec path'
+          : 'resume exists as a separate subcommand, not a reconnect of a live turn',
       },
     },
     'show-changes': {
       claudeCode: structuredStdout ? 'partial' : 'no',
       codexAppServer: yesNo(notification.has('turn/diff/updated')),
-      codexExec: 'partial',
+      // --output-schema shapes the final message; it does not report a diff.
+      codexExec: execSchema === 'yes' ? 'partial' : 'no',
       evidence: {
         claudeCode: 'edits appear as tool input in stream-json; no consolidated turn diff',
         codexAppServer: 'ServerNotification: turn/diff/updated',
-        codexExec: 'diffs recoverable from the workspace, not reported per turn',
+        codexExec: execSchema === 'yes'
+          ? 'diffs recoverable from the workspace, not reported per turn'
+          : 'no per-turn diff reporting on the exec path',
       },
     },
   };
@@ -310,6 +366,10 @@ function loadFixtures() {
     claudeHelp: readClaudeHelp(read('claude-code-help.txt')),
     codexMethods: readCodexMethods(JSON.parse(read('codex-app-server-methods.json'))),
     codexExecHelp: readClaudeHelp(read('codex-exec-help.txt')),
+    claudeLifecycle: readClaudeLifecycle({
+      stopHelp: read('claude-code-stop-help.txt'),
+      attachHelp: read('claude-code-attach-help.txt'),
+    }),
     versions: read('versions.txt').trim(),
   };
 }
@@ -333,9 +393,16 @@ function table(rows) {
   return lines.join('\n');
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const { claudeHelp, codexMethods, codexExecHelp, versions } = loadFixtures();
-  const rows = capabilityRows({ claudeHelp, codexMethods });
+// `file://${process.argv[1]}` silently fails to match when the checkout path
+// contains a space (the URL is percent-encoded), and `process.argv[1]` is
+// undefined when this module is imported, which pathToFileURL rejects. Both are
+// why this guard is written the way it is.
+const isEntryPoint = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntryPoint) {
+  const { claudeHelp, codexMethods, codexExecHelp, claudeLifecycle, versions } = loadFixtures();
+  const rows = capabilityRows({ claudeHelp, codexMethods, codexExecHelp, claudeLifecycle });
 
   console.log('# harness-probe (offline capability matrix)\n');
   console.log('Recorded versions:\n');

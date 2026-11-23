@@ -7,7 +7,17 @@
 // the cost axis cannot be established in a sandbox with no network.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -103,6 +113,7 @@ test('CAP-004: capability matrix is derived from evidence, not asserted by hand'
     codexMethods: readCodexMethods(
       JSON.parse(readFileSync(fixture('codex-app-server-methods.json'), 'utf8')),
     ),
+    codexExecHelp: readClaudeHelp(readFileSync(fixture('codex-exec-help.txt'), 'utf8')),
     claudeLifecycle: claudeLifecycle(),
   });
   const byControl = (id) => rows.find((r) => r.control === id);
@@ -153,8 +164,9 @@ test('COST-001: cost findings separate measured from unmeasured', () => {
 
 test('CAP-006: interrupt and reconnect come from recorded commands, not inference', () => {
   const lifecycle = claudeLifecycle();
-  // `claude stop <id>` is the measured interrupt; it is not in `--help`, which
-  // is why it had to be recorded separately.
+  // `claude stop <id>` is the measured interrupt. The subcommand is listed in
+  // `--help`, but the listing does not say it stops a running session, so the
+  // command's own `--help` page had to be recorded.
   assert.equal(lifecycle.stop, true);
   // `claude attach <id>` is the measured reconnect, and `stop --help` says the
   // conversation is kept for it.
@@ -166,6 +178,7 @@ test('CAP-006: interrupt and reconnect come from recorded commands, not inferenc
     codexMethods: readCodexMethods(
       JSON.parse(readFileSync(fixture('codex-app-server-methods.json'), 'utf8')),
     ),
+    codexExecHelp: readClaudeHelp(readFileSync(fixture('codex-exec-help.txt'), 'utf8')),
     claudeLifecycle: lifecycle,
   });
   const byControl = (id) => rows.find((r) => r.control === id);
@@ -208,4 +221,119 @@ test('CAP-007: the methods fixture is reproducible from a schema bundle', () => 
     reduced,
     JSON.parse(readFileSync(fixture('codex-app-server-methods.json'), 'utf8')),
   );
+});
+
+test('PROBE-001: the CLI entry check works from a path containing a space', () => {
+  // `file://${process.argv[1]}` is not the same string as import.meta.url when
+  // the checkout path holds a space (it is percent-encoded), so the script used
+  // to print nothing and exit 0. Run the real script from such a path.
+  const root = mkdtempSync(join(tmpdir(), 'harness probe '));
+  try {
+    mkdirSync(join(root, 'tools'));
+    mkdirSync(join(root, 'tests', 'harness-evaluation'), { recursive: true });
+    copyFileSync(
+      fileURLToPath(new URL('../../tools/harness-probe.mjs', import.meta.url)),
+      join(root, 'tools', 'harness-probe.mjs'),
+    );
+    symlinkSync(
+      FIXTURES,
+      join(root, 'tests', 'harness-evaluation', 'fixtures'),
+      'dir',
+    );
+    const out = execFileSync(process.execPath, [join(root, 'tools', 'harness-probe.mjs')], {
+      encoding: 'utf8',
+    });
+    assert.match(out, /harness-probe \(offline capability matrix\)/);
+    assert.match(out, /\| control\s+\|/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('CAP-008: flag choices are per flag, not one shared set', () => {
+  // One flag's choices must not satisfy a check written against another flag.
+  const help = readClaudeHelp([
+    'Usage: claude [options] [prompt]',
+    '',
+    'Options:',
+    '  --input-format <format>   Input format (choices: "text",',
+    '                            "stream-json")',
+    '  --output-format <format>  Output format (choices: "text", "json")',
+    '  -p, --print               Print response and exit',
+    '',
+  ].join('\n'));
+  assert.deepEqual([...help.entryValues.get('--output-format')].sort(), ['json', 'text']);
+  assert.deepEqual([...help.entryValues.get('--input-format')].sort(), ['stream-json', 'text']);
+
+  const rows = capabilityRows({
+    claudeHelp: help,
+    codexMethods: readCodexMethods({}),
+    codexExecHelp: readClaudeHelp('Usage: codex exec [OPTIONS] [PROMPT]\n'),
+  });
+  const byControl = (id) => rows.find((r) => r.control === id);
+  // stream-json only exists for --input-format here, so it cannot make the
+  // stdout check pass.
+  assert.equal(byControl('tool-activity').claudeCode, 'no');
+  assert.equal(byControl('answer-question').claudeCode, 'yes');
+});
+
+test('CAP-009: the codex exec column is derived from the recorded help page', () => {
+  const real = readClaudeHelp(readFileSync(fixture('codex-exec-help.txt'), 'utf8'));
+  const methods = readCodexMethods({});
+  const rows = capabilityRows({
+    claudeHelp: readClaudeHelp(readFileSync(fixture('claude-code-help.txt'), 'utf8')),
+    codexMethods: methods,
+    codexExecHelp: real,
+  });
+  const byControl = (id) => rows.find((r) => r.control === id);
+  assert.equal(byControl('start-work').codexExec, 'yes');
+  assert.equal(byControl('tool-activity').codexExec, 'partial');
+  assert.equal(byControl('answer-question').codexExec, 'no');
+  assert.equal(byControl('approve-permission').codexExec, 'no');
+  assert.equal(byControl('interrupt').codexExec, 'no');
+  assert.equal(byControl('reconnect').codexExec, 'no');
+  assert.equal(byControl('show-changes').codexExec, 'partial');
+
+  // Drop the JSONL flag and the streaming cell follows the fixture, not a
+  // hardcoded string.
+  const withoutJson = readClaudeHelp(
+    readFileSync(fixture('codex-exec-help.txt'), 'utf8').replace(/^\s+--json\s*$/m, ''),
+  );
+  const damaged = capabilityRows({
+    claudeHelp: readClaudeHelp(readFileSync(fixture('claude-code-help.txt'), 'utf8')),
+    codexMethods: methods,
+    codexExecHelp: withoutJson,
+  });
+  assert.equal(withoutJson.flags.has('--json'), false);
+  assert.equal(damaged.find((r) => r.control === 'tool-activity').codexExec, 'no');
+});
+
+test('CAP-010: the documented matrix matches the derived matrix', () => {
+  const doc = readFileSync(
+    fileURLToPath(new URL('../../docs/harness-evaluation.md', import.meta.url)),
+    'utf8',
+  );
+  const rows = capabilityRows({
+    claudeHelp: readClaudeHelp(readFileSync(fixture('claude-code-help.txt'), 'utf8')),
+    codexMethods: readCodexMethods(
+      JSON.parse(readFileSync(fixture('codex-app-server-methods.json'), 'utf8')),
+    ),
+    codexExecHelp: readClaudeHelp(readFileSync(fixture('codex-exec-help.txt'), 'utf8')),
+    claudeLifecycle: claudeLifecycle(),
+  });
+
+  const documented = new Map();
+  for (const line of doc.split('\n')) {
+    const match = /^\|\s*`?([a-z-]+)`?\s*\|(.*)\|$/.exec(line);
+    if (!match || !(match[1] in APPROVAL_SURFACES)) continue;
+    documented.set(match[1], match[2].split('|').map((cell) => cell.trim()));
+  }
+  assert.equal(documented.size, Object.keys(APPROVAL_SURFACES).length);
+  for (const row of rows) {
+    assert.deepEqual(
+      documented.get(row.control),
+      [row.claudeCode, row.codexAppServer, row.codexExec],
+      `docs row for ${row.control} disagrees with capabilityRows()`,
+    );
+  }
 });

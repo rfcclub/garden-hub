@@ -33,7 +33,12 @@ Three observations were recorded, not assumed:
    that reduction and compares it to the summary without `codex` installed.
 2. **CLI surfaces.** `claude --help` and `codex exec --help` were captured
    verbatim to `fixtures/claude-code-help.txt` and
-   `fixtures/codex-exec-help.txt`.
+   `fixtures/codex-exec-help.txt`. The Claude page also lists the
+   background-session subcommands (`attach <id|name>`, `logs <id|name>`,
+   `stop|kill <id>`, and `--bg` to start one), so interrupt and reconnect are
+   visible at the top level. A listing there does not state what those commands
+   do, so `claude stop --help` and `claude attach --help` were recorded too, as
+   `fixtures/claude-code-stop-help.txt` and `claude-code-attach-help.txt`.
 3. **Executability in this sandbox.** An offline attempt at each harness to
    establish whether the cost axis could be measured at all:
 
@@ -89,7 +94,9 @@ each row in `capabilityRows()`:
 - **Claude Code `--print` + `--input-format/--output-format stream-json`**
   exposes the same controls as flags plus a control-stdin channel
   (`--session-id`/`--resume` for reconnect, `--include-partial-messages` for
-  streaming). Its one gap is permission answering: `--print` alone denies
+  streaming), and the CLI lists `stop|kill <id>` (interrupt) and
+  `attach <id|name>` (reconnect) as subcommands, whose own `--help` pages were
+  recorded. Its one gap is permission answering: `--print` alone denies
   anything that would prompt, and a per-call answer requires a host
   (`--permission-prompts host`, or `--permission-prompt-tool`). That is a
   property of the integration, not of the harness.
@@ -138,8 +145,10 @@ here. Treat this axis as open until the networked run above includes it.
 
 ## 5. Recommendation
 
-1. **Do not pursue `codex exec` as the execution surface.** Measured: it fails
-   five of seven controls, including every interactive one. It is the right
+1. **Do not pursue `codex exec` as the execution surface.** Measured: of the
+   seven controls it is `yes` on one (start-work), `partial` on two
+   (tool-activity, show-changes) and `no` on four (answer-question,
+   approve-permission, interrupt, reconnect). It is the right
    tool for batch, non-interactive work and the wrong one for "handle a
    permission prompt, interrupt, reconnect".
 2. **Keep the interactive CLI as the behavioural baseline, but not as the
