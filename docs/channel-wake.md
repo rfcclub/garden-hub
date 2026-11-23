@@ -53,10 +53,19 @@ Its patched native allowlist must include exactly `garden-hub`.
 
 The Garden Hub side is fail-closed too: the `codex` bridge is granted per MCP
 server name (`GHUB_MCP_SERVER_NAME`, default and only trusted value
-`garden-hub`). A process reporting any other name in `serverInfo.name` neither
-advertises the wake capability nor emits `codex/user-input`, so a lookalike
-registration cannot turn arbitrary MCP servers into user turns. The store and
-inbox keep working in that case; mail is pull-only.
+`garden-hub`). Under the `codex` adapter, a process reporting any other name in
+`serverInfo.name` is downgraded to no wake: it neither advertises the wake
+capability nor emits `codex/user-input`, so a lookalike registration cannot turn
+an arbitrary MCP server into a user turn. The store and inbox keep working in
+that case; mail is pull-only.
+
+That name gate covers the `codex` bridge only. It is not a global server-name
+policy: the `common`, `omp` and `claude` adapters still advertise the negotiated
+`garden-hub/channel-wake` capability and emit their own notification shape
+whatever `serverInfo.name` says. Those paths are trusted on the client side
+instead, so a deployment that relies on them must register the server as exactly
+`garden-hub` and filter the raw server name there (the OMP extension below does
+both).
 
 ## OMP
 

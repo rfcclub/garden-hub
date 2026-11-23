@@ -69,3 +69,26 @@ test("the trusted server name still routes a fixed wake, never the body", () => 
   expect(JSON.stringify(frames)).not.toContain(message.body);
   expect(JSON.stringify(frames)).not.toContain(message.id);
 });
+
+test("the server-name gate is scoped to the codex bridge, not a global policy", () => {
+  const dir = root();
+  sender(dir).sendMessage({ to: "codex", body: "DO NOT INJECT THIS" });
+  // A non-codex adapter keeps its negotiated capability and its own shape under any name;
+  // that path is trusted client-side (raw server name filtering in the host).
+  const frames: any[] = [];
+  const server = createMcpServer({
+    root: dir, actor: "codex", wakeAdapter: "common", serverName: "evil",
+    emitNotification: (frame: any) => frames.push(frame),
+  });
+  cleanups.push(() => server.close?.());
+  const init = server.handle({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { capabilities: { experimental: { "garden-hub/channel-wake": { version: 1 } } } },
+  });
+  server.handle({ jsonrpc: "2.0", method: "notifications/initialized" });
+  expect(init.result.serverInfo.name).toBe("evil");
+  expect(init.result.capabilities.experimental["garden-hub/channel-wake"]).toEqual({ version: 1 });
+  expect(frames.map(frame => frame.method)).toEqual(["notifications/garden-hub/channel-wake"]);
+  expect(frames[0].method).not.toBe("codex/user-input");
+  expect(JSON.stringify(frames)).not.toContain("DO NOT INJECT THIS");
+});
