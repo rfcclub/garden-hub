@@ -56,7 +56,7 @@ restarted after a crash or a closed terminal:
 
 ```sh
 tools/service/ghub-service.sh install     # write and load the agent [--force]
-tools/service/ghub-service.sh status      # loaded? what does /api/ answer?
+tools/service/ghub-service.sh status      # loaded? what does /api/events answer?
 tools/service/ghub-service.sh uninstall   # unload and remove it
 tools/service/ghub-service.sh print       # show the plist; changes nothing
 ```

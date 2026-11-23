@@ -1,8 +1,11 @@
-// ghub-service tests - `print` only. They never touch launchd and never write a
-// file: the script renders the plist from the template and exits.
+// ghub-service tests - `print` and the read-only part of `status`. They never
+// touch launchd and never write outside a temp directory: `print` renders the
+// plist from the template and exits, and `status` only reads a temp HOME.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -126,4 +129,95 @@ test('SVC-006: print fails with a clear message when node cannot be resolved', (
   assert.equal(result.stdout, '', 'nothing may be printed on failure');
   assert.match(result.stderr, /node/i);
   assert.match(result.stderr, /PATH/);
+});
+
+test('SVC-007: print fails closed when HOME is not set', () => {
+  const env = { ...process.env };
+  delete env.HOME;
+  const result = spawnSync('/bin/bash', [SCRIPT, 'print'], { env, encoding: 'utf8' });
+
+  assert.notEqual(result.status, 0, 'a missing HOME must not produce a plist');
+  assert.equal(result.stdout, '', 'nothing may be printed on failure');
+  assert.match(result.stderr, /HOME/);
+});
+
+test('SVC-008: print keeps sed metacharacters in the checkout path literal', () => {
+  // Render the service from a copy living in a directory whose name contains
+  // `&` and `|`, both special to a sed substitution. The plist is XML, so `&`
+  // arrives as the `&amp;` entity, which plist readers decode back to `&`.
+  const parent = mkdtempSync(join(tmpdir(), 'ghub-service-'));
+  try {
+    const repo = join(parent, 'gh amp&pipe|checkout<xml>');
+    cpSync(join(__dirname, 'service'), join(repo, 'tools', 'service'), { recursive: true });
+    const script = join(repo, 'tools', 'service', 'ghub-service.sh');
+
+    const result = spawnSync('/bin/bash', [script, 'print'], {
+      env: { ...process.env },
+      encoding: 'utf8',
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(!result.stdout.includes('@'), 'placeholders must all be filled in');
+
+    const xml = (value) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    assert.ok(
+      result.stdout.includes(`<string>${xml(repo)}/tools/ghub-dashboard.mjs</string>`),
+      'the entry point must resolve inside the checkout, not keep the placeholder',
+    );
+    assert.ok(result.stdout.includes(`<string>${xml(repo)}/events</string>`));
+    assert.ok(result.stdout.includes(`<string>${xml(repo)}</string>`));
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test('SVC-009: install, uninstall and status fail closed when HOME is not set', () => {
+  for (const command of ['install', 'uninstall', 'status']) {
+    const env = { ...process.env };
+    delete env.HOME;
+    const result = spawnSync('/bin/bash', [SCRIPT, command], { env, encoding: 'utf8' });
+
+    assert.notEqual(result.status, 0, `${command} must not run without a home directory`);
+    assert.equal(result.stdout, '', `${command} must print nothing on failure`);
+    assert.match(result.stderr, /HOME/, `${command} must say why it refused`);
+  }
+});
+
+test('SVC-010: status probes the port recorded in the installed plist', () => {
+  // A temp HOME with a plist for a non-default port. `status` reads that file
+  // and prints the URL it probed; it never writes and never loads anything.
+  const home = mkdtempSync(join(tmpdir(), 'ghub-service-home-'));
+  try {
+    mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true });
+    writeFileSync(
+      join(home, 'Library', 'LaunchAgents', `${LABEL}.plist`),
+      [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<plist version="1.0">',
+        '<dict>',
+        '  <key>EnvironmentVariables</key>',
+        '  <dict>',
+        '    <key>GHUB_DASHBOARD_PORT</key>',
+        '    <string>51234</string>',
+        '  </dict>',
+        '</dict>',
+        '</plist>',
+        '',
+      ].join('\n'),
+    );
+
+    const result = spawnSync('/bin/bash', [SCRIPT, 'status'], {
+      env: { ...process.env, HOME: home, GHUB_DASHBOARD_PORT: '47821' },
+      encoding: 'utf8',
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /127\.0\.0\.1:51234\//, 'status must use the installed port');
+    assert.ok(
+      !result.stdout.includes(':47821') && !result.stdout.includes(':47820'),
+      'status must use neither the ambient nor the default port',
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

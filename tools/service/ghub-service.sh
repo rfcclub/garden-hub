@@ -6,7 +6,7 @@
 #   ghub-service.sh install    install and load the agent [--force]
 #   ghub-service.sh uninstall  unload and remove the agent
 #   ghub-service.sh status     show whether the agent is loaded and what the
-#                              dashboard's /api/ answers
+#                              dashboard's /api/events answers
 #
 # `print` changes nothing: no file is written and launchd is never contacted.
 # The agent runs this checkout's tools/ghub-dashboard.mjs with the absolute
@@ -85,23 +85,114 @@ agent_path() {
   printf '%s/%s.plist\n' "$(agent_dir)" "${LABEL}"
 }
 
+# The port the agent was actually installed with. `status` asks the running
+# dashboard, not the ambient environment: after `GHUB_DASHBOARD_PORT=5000
+# install`, a plain `status` still probed the default and reported no response.
+installed_port() {
+  local agent="$1" port=""
+  if [ -f "${agent}" ]; then
+    port="$(awk -F'[<>]' '
+      /<key>GHUB_DASHBOARD_PORT<\/key>/ { want = 1; next }
+      want && /<string>/ { print $3; exit }
+    ' "${agent}" 2>/dev/null || true)"
+  fi
+  case "${port}" in
+    ''|*[!0-9]*) resolve_port ;;
+    *) printf '%s\n' "${port}" ;;
+  esac
+}
+
 log_dir() {
   require_home
   printf '%s\n' "${HOME}/Library/Logs/anima"
 }
 
+# Fill the template by literal replacement, not by sed or by parameter
+# expansion: a checkout path may contain `&`, `|`, `\`, `<`, `>` or `@`, all of
+# which sed or bash's `${x//a/b}` would reinterpret (bash 5.2 replaces `&` with
+# the matched text, bash 3.2 keeps a backslash). The template is scanned once,
+# so an inserted value is never substituted again, and XML escaping happens
+# here too, character by character, so the same code runs under /bin/bash 3.2
+# and under a newer shell. Values arrive through the environment, which awk
+# does not process as escape sequences.
+RENDER_AWK='
+function xesc(text,   out, i, ch) {
+  out = ""
+  for (i = 1; i <= length(text); i++) {
+    ch = substr(text, i, 1)
+    if (ch == "&") out = out "&amp;"
+    else if (ch == "<") out = out "&lt;"
+    else if (ch == ">") out = out "&gt;"
+    else out = out ch
+  }
+  return out
+}
+{
+  rest = $0
+  out = ""
+  while (rest != "") {
+    at = 0
+    len = 0
+    val = ""
+    i = index(rest, "@NODE@")
+    if (i > 0) { at = i; len = 6; val = node }
+    i = index(rest, "@REPO@")
+    if (i > 0 && (at == 0 || i < at)) { at = i; len = 6; val = repo }
+    i = index(rest, "@PORT@")
+    if (i > 0 && (at == 0 || i < at)) { at = i; len = 6; val = port }
+    i = index(rest, "@LOG@")
+    if (i > 0 && (at == 0 || i < at)) { at = i; len = 5; val = logpath }
+    if (at == 0) {
+      out = out rest
+      rest = ""
+    } else {
+      out = out substr(rest, 1, at - 1) xesc(val)
+      rest = substr(rest, at + len)
+    }
+  }
+  print out
+}
+'
+
 render() {
-  local node port
+  require_home
+  local node port log
   node="$(resolve_node)"
   port="$(resolve_port)"
+  log="$(log_dir)/garden-hub-dashboard.log"
   [ -f "${TEMPLATE}" ] || die "plist template not found: ${TEMPLATE}"
 
-  sed \
-    -e "s|@NODE@|${node}|g" \
-    -e "s|@REPO@|${REPO}|g" \
-    -e "s|@PORT@|${port}|g" \
-    -e "s|@LOG@|$(log_dir)/garden-hub-dashboard.log|g" \
-    "${TEMPLATE}"
+  # Every placeholder must be present, or the agent would launch without that
+  # value; refuse instead of writing a half-filled plist.
+  local placeholder
+  for placeholder in @NODE@ @REPO@ @PORT@ @LOG@; do
+    grep -qF -- "${placeholder}" "${TEMPLATE}" ||
+      die "plist template is missing ${placeholder}: ${TEMPLATE}"
+  done
+
+  local plist
+  plist="$(
+    GHUB_SVC_NODE="${node}" \
+      GHUB_SVC_REPO="${REPO}" \
+      GHUB_SVC_PORT="${port}" \
+      GHUB_SVC_LOG="${log}" \
+      awk -v begin=1 '
+        BEGIN {
+          node = ENVIRON["GHUB_SVC_NODE"]
+          repo = ENVIRON["GHUB_SVC_REPO"]
+          port = ENVIRON["GHUB_SVC_PORT"]
+          logpath = ENVIRON["GHUB_SVC_LOG"]
+        }
+        '"${RENDER_AWK}"'
+      ' "${TEMPLATE}"
+  )" || die "cannot render plist template: ${TEMPLATE}"
+
+  case "${plist}" in
+    *@NODE@*|*@REPO@*|*@PORT@*|*@LOG@*)
+      die "plist template has an unsubstituted placeholder: ${TEMPLATE}" ;;
+  esac
+
+  printf '%s\n' "${plist}"
 }
 
 cmd_print() {
@@ -109,6 +200,7 @@ cmd_print() {
 }
 
 cmd_install() {
+  require_home
   local force=0
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -143,6 +235,7 @@ cmd_install() {
 }
 
 cmd_uninstall() {
+  require_home
   local agent
   agent="$(agent_path)"
   launchctl bootout "gui/$(id -u)/${LABEL}" >/dev/null 2>&1 || true
@@ -171,14 +264,14 @@ cmd_status() {
   fi
 
   local port
-  port="$(resolve_port)"
+  port="$(installed_port "${agent}")"
   if command -v curl >/dev/null 2>&1; then
     local code
     code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
-      "http://127.0.0.1:${port}/api/" 2>/dev/null || true)"
-    echo "http: GET http://127.0.0.1:${port}/api/ -> ${code:-no response}"
+      "http://127.0.0.1:${port}/api/events" 2>/dev/null || true)"
+    echo "http: GET http://127.0.0.1:${port}/api/events -> ${code:-no response}"
   else
-    echo "http: curl not found; cannot probe http://127.0.0.1:${port}/api/"
+    echo "http: curl not found; cannot probe http://127.0.0.1:${port}/api/events"
   fi
 }
 
