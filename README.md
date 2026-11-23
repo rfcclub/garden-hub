@@ -43,6 +43,35 @@ The configured actor does not cryptographically distinguish one client from anot
 
 `pr_merge` fails closed until a prior `pr_poll` observed a non-author approval for the current head and base. It refuses a stale approval, unresolved review threads and current change requests, then passes the expected head SHA to GitHub's merge command. The server relays review text supplied by the calling agent; it does not write review text itself.
 
+## Dashboard service
+
+The dashboard is a foreground process by default:
+
+```sh
+node tools/ghub-dashboard.mjs          # stop it with Ctrl-C
+```
+
+On macOS it can also run as a launchd user agent, so it starts at login and is
+restarted after a crash or a closed terminal:
+
+```sh
+tools/service/ghub-service.sh install     # write and load the agent [--force]
+tools/service/ghub-service.sh status      # loaded? what does /api/ answer?
+tools/service/ghub-service.sh uninstall   # unload and remove it
+tools/service/ghub-service.sh print       # show the plist; changes nothing
+```
+
+`install` writes `~/Library/LaunchAgents/com.anima.garden-hub-dashboard.plist`
+(mode 644) and bootstraps it, refusing to replace a plist that differs from the
+rendered one unless `--force` is given. The agent runs this checkout's
+`tools/ghub-dashboard.mjs` with the absolute node and repository paths resolved
+at install time, sets `GHUB_EVENTS_DIR` to this checkout's `events/` directory,
+leaves `GHUB_WORK_DB` unset (so `/api/works` reports `source: "unavailable"`
+unless the database is configured elsewhere), listens only on `127.0.0.1` at
+`GHUB_DASHBOARD_PORT` (default `47820`) and logs to
+`~/Library/Logs/anima/garden-hub-dashboard.log`. It holds no secret. A missing
+node or repository path is an error; nothing is guessed.
+
 ## Tests
 
 ```sh
