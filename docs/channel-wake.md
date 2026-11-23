@@ -36,7 +36,7 @@ one client and must emit that client's notification shape. A second runtime can
 use its own process and configuration, but do not run Codex and OMP as competing
 `codex` consumers of the same inbox while validating delivery: both can see the
 same unacknowledged message and race to reply or acknowledge it. Claude Code
-currently uses pull-based inbox reads and has no wake adapter in this kit.
+uses the `claude` adapter described above.
 
 Common/OMP JSON-RPC notification:
 
@@ -50,6 +50,13 @@ key, not a path or instruction. Receivers still read `message_inbox`.
 Codex emits `{"jsonrpc":"2.0","method":"codex/user-input","params":{"text":"..."}}`
 where text is the fixed local `INBOX_INSTRUCTION`, never third-party message text.
 Its patched native allowlist must include exactly `garden-hub`.
+
+The Garden Hub side is fail-closed too: the `codex` bridge is granted per MCP
+server name (`GHUB_MCP_SERVER_NAME`, default and only trusted value
+`garden-hub`). A process reporting any other name in `serverInfo.name` neither
+advertises the wake capability nor emits `codex/user-input`, so a lookalike
+registration cannot turn arbitrary MCP servers into user turns. The store and
+inbox keep working in that case; mail is pull-only.
 
 ## OMP
 
