@@ -208,6 +208,7 @@ Offline, from the source or extracted kit:
 cd "$GHUB_DIR"
 node --test tools/ghub-mcp.test.mjs
 node --check extensions/garden-hub-wake.mjs
+node tools/ghub-watch-probe.mjs   # host filesystem-watcher verdict
 ```
 
 These tests use temporary state and mocked GitHub results, not live PR writes.
@@ -242,6 +243,11 @@ reviewer identities.
 - Missing tools: check the absolute Node/module paths, trusted config scope,
   client restart, and MCP stderr. stdout must contain only JSON-RPC.
 - Empty inbox: compare actor and **resolved state paths** on both clients.
+- Mail exists but no wake on one host: run `npm run test:watch-probe`. If it
+  reports `supported: false`, the host's filesystem watcher never delivers a
+  callback (Garden Hub #6 saw this on macOS arm64). Startup and reconnect
+  scanning still work; live wake does not, and mail must be read with
+  `message_inbox`. There is no polling fallback.
 - Mail exists but no wake: check patched binary identity or OMP extension,
   exact `garden-hub` name, that `GHUB_MCP_WAKE_ADAPTER` is not `off`, and the
   initialized connection. Claude Code also needs the dev-channels launch flag;
