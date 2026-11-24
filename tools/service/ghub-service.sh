@@ -212,18 +212,33 @@ cmd_install() {
 
   check_dashboard
 
-  local plist agent
+  local plist agent node
   plist="$(render)"
   agent="$(agent_path)"
 
+  [ ! -L "${agent}" ] || die "${agent} is a symbolic link; refusing to install"
+  if [ -e "${agent}" ] && [ ! -f "${agent}" ]; then
+    die "${agent} is not a regular file; refusing to install"
+  fi
   if [ -f "${agent}" ] && [ "${force}" -ne 1 ] &&
     [ "${plist}" != "$(cat "${agent}")" ]; then
     die "${agent} exists with different contents; re-run with --force to replace it"
   fi
 
   mkdir -p "$(agent_dir)" "$(log_dir)"
-  printf '%s\n' "${plist}" >"${agent}"
-  chmod 644 "${agent}"
+  node="$(resolve_node)"
+  # The pre-check alone cannot prevent a link from being swapped in later.
+  # Open without following the final path component, then write and chmod the
+  # descriptor so neither operation can be redirected through a symlink.
+  printf '%s\n' "${plist}" | "${node}" -e '
+    const fs = require("node:fs");
+    const flags = fs.constants;
+    if (typeof flags.O_NOFOLLOW !== "number") throw new Error("O_NOFOLLOW is unavailable");
+    const data = fs.readFileSync(0);
+    const fd = fs.openSync(process.argv[1], flags.O_WRONLY | flags.O_CREAT | flags.O_TRUNC | flags.O_NOFOLLOW, 0o644);
+    try { fs.writeFileSync(fd, data); fs.fchmodSync(fd, 0o644); }
+    finally { fs.closeSync(fd); }
+  ' "${agent}" || die "cannot safely write ${agent}"
 
   # Replace a previously loaded copy so the new one takes effect.
   launchctl bootout "gui/$(id -u)/${LABEL}" >/dev/null 2>&1 || true

@@ -1,12 +1,11 @@
-// ghub-service tests - `print` and the read-only part of `status`. They never
-// touch launchd and never write outside a temp directory: `print` renders the
-// plist from the template and exits, and `status` only reads a temp HOME.
+// ghub-service tests use temporary homes and a fake launchctl for install.
+// No test installs, unloads, or otherwise contacts a real launchd service.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -219,5 +218,130 @@ test('SVC-010: status probes the port recorded in the installed plist', () => {
     );
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// These tests use a copied script, a fake HOME and a fake launchctl. The
+// dashboard stub only satisfies the entry-point check; it is never executed.
+function makeInstallFixture({ race = false } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'ghub-service-test-'));
+  const home = join(root, 'home');
+  const repoTools = join(root, 'repo', 'tools');
+  const bin = join(root, 'bin');
+  const agentDir = join(home, 'Library', 'LaunchAgents');
+  const agent = join(agentDir, `${LABEL}.plist`);
+  const log = join(root, 'launchctl.log');
+  const marker = join(root, 'race-marker');
+  const victim = join(root, 'victim');
+  mkdirSync(repoTools, { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  cpSync(join(__dirname, 'service'), join(repoTools, 'service'), { recursive: true });
+  writeFileSync(join(repoTools, 'ghub-dashboard.mjs'), '// test stub\n');
+  const launchctl = join(bin, 'launchctl');
+  writeFileSync(launchctl, '#!/bin/bash\nprintf "%s\\n" "$*" >> "$GHUB_TEST_LAUNCHCTL_LOG"\n');
+  chmodSync(launchctl, 0o755);
+  if (race) {
+    const node = join(bin, 'node');
+    writeFileSync(node, [
+      '#!/bin/bash',
+      'if [ "${1:-}" = "-e" ]; then',
+      '  ln -s "$GHUB_TEST_VICTIM" "$GHUB_TEST_AGENT"',
+      '  printf "injected\\n" > "$GHUB_TEST_RACE_MARKER"',
+      'fi',
+      'exec "$GHUB_TEST_REAL_NODE" "$@"',
+      '',
+    ].join('\n'));
+    chmodSync(node, 0o755);
+  }
+  const env = {
+    ...process.env,
+    HOME: home,
+    PATH: `${bin}${delimiter}${process.env.PATH || ''}`,
+    GHUB_DASHBOARD_PORT: DEFAULT_PORT,
+    GHUB_TEST_LAUNCHCTL_LOG: log,
+    GHUB_TEST_AGENT: agent,
+    GHUB_TEST_VICTIM: victim,
+    GHUB_TEST_RACE_MARKER: marker,
+    GHUB_TEST_REAL_NODE: process.execPath,
+  };
+  return {
+    root, agent, log, marker, victim,
+    install: (...args) => spawnSync('/bin/bash', [join(repoTools, 'service', 'ghub-service.sh'), 'install', ...args], { env, encoding: 'utf8' }),
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+for (const kind of ['file', 'directory', 'dangling']) {
+  for (const force of [false, true]) {
+    test(`SVC-SYMLINK-1: refuse ${kind} link${force ? ' with --force' : ''}`, () => {
+      const f = makeInstallFixture();
+      try {
+        if (kind === 'file') {
+          writeFileSync(f.victim, 'victim must remain unchanged\n');
+          chmodSync(f.victim, 0o600);
+        } else if (kind === 'directory') {
+          mkdirSync(f.victim);
+          writeFileSync(join(f.victim, 'keep'), 'directory remains unchanged\n');
+        }
+        symlinkSync(f.victim, f.agent, kind === 'directory' ? 'dir' : 'file');
+        const result = f.install(...(force ? ['--force'] : []));
+        if (kind === 'file') {
+          assert.equal(readFileSync(f.victim, 'utf8'), 'victim must remain unchanged\n', 'install must not overwrite the linked file');
+          assert.equal(statSync(f.victim).mode & 0o777, 0o600, 'install must not chmod the linked file');
+        } else if (kind === 'directory') {
+          assert.equal(readFileSync(join(f.victim, 'keep'), 'utf8'), 'directory remains unchanged\n');
+        } else {
+          assert.equal(existsSync(f.victim), false, 'install must not create a dangling link target');
+        }
+        assert.notEqual(result.status, 0, 'installation must fail on a link');
+        assert.ok(lstatSync(f.agent).isSymbolicLink());
+        assert.equal(readlinkSync(f.agent), f.victim);
+        assert.equal(existsSync(f.log), false, 'must not call launchctl');
+      } finally {
+        f.cleanup();
+      }
+    });
+  }
+}
+
+test('SVC-SYMLINK-2: refuse a link inserted between the check and open', () => {
+  const f = makeInstallFixture({ race: true });
+  try {
+    writeFileSync(f.victim, 'race victim remains unchanged\n');
+    chmodSync(f.victim, 0o600);
+    const result = f.install();
+    assert.ok(existsSync(f.marker), 'the fake Node wrapper must inject the race');
+    assert.notEqual(result.status, 0, 'a substituted link must fail closed');
+    assert.ok(lstatSync(f.agent).isSymbolicLink());
+    assert.equal(readFileSync(f.victim, 'utf8'), 'race victim remains unchanged\n');
+    assert.equal(statSync(f.victim).mode & 0o777, 0o600);
+    assert.equal(existsSync(f.log), false, 'must not call launchctl after a failed open');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('SVC-SYMLINK-3: normal and forced regular installs retain their behavior', () => {
+  const f = makeInstallFixture();
+  try {
+    let result = f.install();
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(lstatSync(f.agent).isFile());
+    assert.equal(statSync(f.agent).mode & 0o777, 0o644);
+    assert.match(readFileSync(f.agent, 'utf8'), /<plist version="1\.0">/);
+    assert.equal(readFileSync(f.log, 'utf8').split('\n').filter(line => line.startsWith('bootstrap ')).length, 1);
+    writeFileSync(f.agent, 'different regular plist\n');
+    result = f.install();
+    assert.notEqual(result.status, 0, 'a different regular plist requires --force');
+    assert.equal(readFileSync(f.agent, 'utf8'), 'different regular plist\n');
+    result = f.install('--force');
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(lstatSync(f.agent).isFile());
+    assert.equal(statSync(f.agent).mode & 0o777, 0o644);
+    assert.match(readFileSync(f.agent, 'utf8'), /<plist version="1\.0">/);
+    assert.equal(readFileSync(f.log, 'utf8').split('\n').filter(line => line.startsWith('bootstrap ')).length, 2);
+  } finally {
+    f.cleanup();
   }
 });

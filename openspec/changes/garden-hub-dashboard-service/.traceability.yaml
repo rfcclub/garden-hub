@@ -1,0 +1,10 @@
+scenarios:
+  - scenario: do-not-follow-an-installation-destination-link-existing-symbolic-link
+    test: tools/ghub-service.test.mjs
+    status: passing
+  - scenario: do-not-follow-an-installation-destination-link-link-swapped-after-the-pre-check
+    test: tools/ghub-service.test.mjs
+    status: passing
+  - scenario: do-not-follow-an-installation-destination-link-regular-destination
+    test: tools/ghub-service.test.mjs
+    status: passing
