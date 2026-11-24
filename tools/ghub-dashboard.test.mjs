@@ -467,3 +467,28 @@ test('DASH-011: the works cursor never duplicates a row that arrives at the top'
     assert.equal(second.next, null);
   });
 });
+
+test('DASH-016: a row whose issue is not a positive integer never ends the paging', async () => {
+  const stamp = '2026-10-13T12:00:00.000Z';
+  const path = worksDb([
+    workRow({ issue: 9, updated_at: stamp }),
+    workRow({ issue: 8.5, updated_at: stamp }),
+    workRow({ issue: 7, updated_at: stamp }),
+    workRow({ issue: 6, updated_at: stamp }),
+    workRow({ issue: '5x', updated_at: stamp }),
+    workRow({ issue: 2 ** 60, updated_at: stamp }),
+    workRow({ issue: 4, updated_at: stamp }),
+  ]);
+  for (const limit of [1, 2, 3, 60]) {
+    await withServer({ dbPath: path }, async ({ socketPath }) => {
+      const pages = await worksPages(socketPath, limit);
+      const issues = pages.flatMap((page) => page.works.map((work) => work.issue));
+      assert.equal(issues.length, 7, `limit ${limit} reached every blocked row`);
+      assert.deepEqual(
+        issues.filter((issue) => issue !== null).sort((a, b) => b - a),
+        [9, 7, 6, 4],
+      );
+      assert.equal(issues.filter((issue) => issue === null).length, 3);
+    });
+  }
+});

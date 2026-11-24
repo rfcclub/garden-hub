@@ -196,8 +196,13 @@ function safePrUrl(value, config) {
 // queue between two pages neither shift the cursor nor produce duplicates. One
 // extra row is read to learn whether a next page exists.
 const WORKS_COLUMNS =
-  'SELECT rowid AS work_rowid, repo, issue, state, blocked_reason, pr_url, updated_at,' +
-  ' julianday(updated_at) AS updated_jd, COALESCE(issue, 0) AS sort_issue FROM works';
+  'SELECT rowid AS work_rowid, repo, state, blocked_reason, pr_url, updated_at,' +
+  ' julianday(updated_at) AS updated_jd,' +
+  // An issue that is not a positive integer within the exactly representable
+  // range sorts as 0, so every row has a comparable key and one odd row can
+  // neither end the paging nor make the read fail on an out-of-range integer.
+  " CASE WHEN typeof(issue) = 'integer' AND issue BETWEEN 1 AND 9007199254740991" +
+  ' THEN issue ELSE 0 END AS sort_issue FROM works';
 const WORKS_ORDER =
   'ORDER BY (updated_jd IS NULL), updated_jd DESC, sort_issue DESC, rowid DESC';
 
@@ -234,7 +239,7 @@ function readWorks(dbPath, config, { limit, after }) {
       const updatedMs = typeof row.updated_at === 'string' ? Date.parse(row.updated_at) : NaN;
       return {
         repository: labelFor(row.repo, config.repositoryLabels, NEUTRAL.repository),
-        issue: Number.isSafeInteger(row.issue) && row.issue > 0 ? row.issue : null,
+        issue: row.sort_issue > 0 ? row.sort_issue : null,
         state: 'blocked',
         reason: safeReason(row.blocked_reason, config),
         pr_url: safePrUrl(row.pr_url, config),
