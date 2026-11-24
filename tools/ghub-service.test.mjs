@@ -15,8 +15,10 @@ const LABEL = 'com.anima.garden-hub-dashboard';
 const DEFAULT_PORT = '47820';
 
 function runPrint({ env = {}, command = 'print' } = {}) {
+  const childEnv = { ...process.env };
+  delete childEnv.GHUB_DASHBOARD_PORT;
   return spawnSync('/bin/bash', [SCRIPT, command], {
-    env: { ...process.env, ...env },
+    env: { ...childEnv, ...env },
     encoding: 'utf8',
   });
 }
@@ -90,12 +92,13 @@ test('SVC-003: print binds only the dashboard port from GHUB_DASHBOARD_PORT', ()
   assert.ok(!overridden.includes(DEFAULT_PORT), 'an explicit port must replace the default');
 
   // The only port-looking value in the plist is the dashboard port.
-  const ports = [...new Set(overridden.match(/(?:^|[:=])([0-9]{4,5})(?=$|\D)/gm) ?? [])];
-  assert.ok(overridden.includes('<string>51234</string>'));
+  const stringPorts = [...overridden.matchAll(/<string>\s*([0-9]{1,5})\s*<\/string>/g)].map((match) => match[1]);
+  const embeddedPorts = [...overridden.matchAll(/[:=]([0-9]{1,5})(?=\D|$)/g)].map((match) => match[1]);
+  const ports = [...new Set([...stringPorts, ...embeddedPorts])];
 
   // Loopback only: nothing asks the dashboard to listen elsewhere.
   assert.ok(!/GHUB_DASHBOARD_HOST|GHUB_DASHBOARD_BIND|0\.0\.0\.0/.test(overridden));
-  assert.equal(ports.length <= 1, true, `unexpected extra port values: ${ports.join(',')}`);
+  assert.deepEqual(ports, ['51234'], `unexpected extra port values: ${ports.join(',')}`);
 });
 
 test('SVC-004: print sets the event directory and leaves the work database unset', () => {

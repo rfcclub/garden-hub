@@ -16,6 +16,16 @@
 - [x] **Step 2: GREEN** Refuse a pre-existing destination link; open the destination with `O_NOFOLLOW`, fail if that flag is unavailable, and write and chmod through its file descriptor. Re-run the focused tests.
 - [ ] **Step 3: Verify** Run the full `npm test`, shell syntax checks, `orca verify`, `orca gate-plan`, and `orca gate-code`. Report degraded enforcement and all warnings without changing their verdicts.
 
+### Task 2: Repair the port assertion and isolate its environment
+
+**Files:**
+- Modify: `tools/ghub-service.test.mjs`
+- Probe: `openspec/changes/garden-hub-dashboard-service/port-mutation-probe.mjs`, which creates a temporary fixture outside the repository.
+
+- [x] **Step 1: RED** Run `SVC-003` with an inherited non-default dashboard port and demonstrate that an extra numeric XML string in a temporary template is accepted by the existing assertion.
+- [x] **Step 2: GREEN** Clear the inherited port in the test helper before applying explicit overrides, and extract the rendered XML numeric strings as well as colon/equals-prefixed port values. Require the only unique port to be the explicit dashboard port.
+- [ ] **Step 3: Verify** Run `env GHUB_DASHBOARD_PORT=51235 npm test` and `node openspec/changes/garden-hub-dashboard-service/port-mutation-probe.mjs <variant>` for each of `numeric`, `colon`, `equals`, `numeric-short`, `colon-short`, and `equals-short`. Run `orca verify`, `orca gate-plan`, and `orca gate-code`; preserve all failures and warnings.
+
 ## Verification
 - [x] All relevant executable tests pass in the isolated fixture.
 - [x] Existing regular-file and force behavior remains intact.

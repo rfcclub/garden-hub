@@ -14,3 +14,14 @@ The service installer SHALL refuse a destination that is a symbolic link and SHA
 #### Scenario: Regular destination
 - **WHEN** installation uses a new destination or force-replaces a regular plist
 - **THEN** the resulting file has mode 0644 and fake launchctl receives the normal bootstrap call
+
+### Requirement: Exercise the configured dashboard port
+The service port test SHALL isolate its default-port case from the calling environment and SHALL detect additional port-looking values in the rendered plist.
+
+#### Scenario: A calling environment has a different port
+- **WHEN** the test process inherits a non-default dashboard port
+- **THEN** the default-port check still tests the default and the explicit override check still tests its own configured port
+
+#### Scenario: A rendered plist has an extra port
+- **WHEN** a temporary mutated template adds a second numeric port string or a port after a colon or equals sign
+- **THEN** the port assertion rejects that plist and identifies the unexpected values
