@@ -29,11 +29,11 @@ File: `tests/common-mcp-channel-wake/specs/discovery-fallback.test.ts`.
   return replies[0];
   ```
 
-- [ ] Keep sequential requests and verify reply ids `[1, 2, 3, 4]`. In MCP-004, schedule the synthetic reply with `setImmediate` after the initial wake frame, and verify the wake remains present.
+- [ ] Keep sequential requests and verify reply ids `[1, 2, 3, 4]`. In MCP-004, begin waiting with an empty frame list, deliver the wake, observe the wait while only the wake is present, then deliver the reply with `setImmediate`; verify the wake remains present.
 - [ ] Pin `serverName: 'garden-hub'` in the in-process connection and set `GHUB_MCP_SERVER_NAME: 'garden-hub'` in the stdio child environment so either fixture ignores a caller's configured server name.
 - [ ] Add one regression test per fixture that stubs a different operator-configured name and verifies the expected server name; restore the environment after each test.
 - [ ] Run the discovery spec with `GHUB_MCP_SERVER_NAME=custom-hub` as well as with the ordinary environment; both must pass while retaining the server-name assertion.
-- [ ] Run a disposable probe that delays only the real stdio tools/list response by 300 ms; the corrected helper must pass. In a second probe, change the helper to wait for any frame; MCP-004 must fail with the fixed event-loop scheduling.
+- [ ] Run a disposable probe that delays only the real stdio tools/list response by 300 ms; the corrected helper must pass. Restore the earlier helper that snapshots the frame count before sending and waits for any new frame; MCP-004 must fail when the wake arrives first. Also verify that delivering the reply via a microtask makes the observation check fail.
 - [ ] Mutate discovery to return a success response in a disposable copy; the fallback tests must fail. Record actual results without claiming a test failure before its historical implementation.
 
 ### Task 3: Verify and prepare review publication

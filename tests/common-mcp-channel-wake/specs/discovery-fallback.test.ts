@@ -235,21 +235,30 @@ test('[the-client-shall-receive-a-method-not-found-for-discovery-and-complete-th
   expect(client.errors).toEqual([]);
 });
 
-test('[the-client-shall-receive-a-method-not-found-for-discovery-and-complete-the-legacy-handshake-mcp-004-a-wake-frame-before-a-delayed-reply-is-not-the-answer]', async () => {
-  // Deterministic ordering, no wall clock: the wake frame is already present and
-  // the reply to the request arrives in a later macrotask. This is the shape a
-  // slow stdout write produces in a real session, pinned without its timing.
-  const frames: Frame[] = [
-    { jsonrpc: '2.0', method: WAKE_METHOD, params: { version: 1, recipient: 'claude-code', messageId: 'pending-message' } },
-  ];
-  // setImmediate, not queueMicrotask: `expect.poll` yields through microtasks, so
-  // a queued microtask lands before the matcher ever reads the array and a
-  // frame-count poll would still see the reply. This must be a macrotask, or the
-  // spec cannot tell the matching-id poll from the buggy one.
-  setImmediate(() => frames.push({ jsonrpc: '2.0', id: 9, result: { tools: [] } }));
+test('[the-client-shall-receive-a-method-not-found-for-discovery-and-complete-the-legacy-handshake-mcp-004-a-wake-frame-before-a-delayed-reply-is-not-the-answer] regression: a wake during an in-flight request is not its reply', async () => {
+  // Start waiting with an empty frame list. Deliver a wake while the request is
+  // in flight, then the reply in the next macrotask: counting newly arrived
+  // frames must not mistake the wake for the requested response.
+  let observedWakeBeforeReply = false;
+  let deliveringReply = false;
+  const frames: Frame[] = new Proxy<Frame[]>([], {
+    get(target, key, receiver) {
+      // The only array reader while the wake is alone is the waiting helper.
+      if (key === 'length' && !deliveringReply && target.length === 1) {
+        observedWakeBeforeReply = true;
+      }
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  const pending = awaitReply(frames, 9);
+  frames.push({ jsonrpc: '2.0', method: WAKE_METHOD, params: { version: 1, recipient: 'claude-code', messageId: 'pending-message' } });
+  setImmediate(() => {
+    deliveringReply = true;
+    frames.push({ jsonrpc: '2.0', id: 9, result: { tools: [] } });
+  });
+  const reply = await pending;
 
-  const reply = await awaitReply(frames, 9);
-
+  expect(observedWakeBeforeReply).toBe(true);
   expect(reply.id).toBe(9);
   expect(reply.result).toEqual({ tools: [] });
   // The wake was waited past, not consumed: it is still one envelope on the wire.
