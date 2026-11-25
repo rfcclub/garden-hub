@@ -83,7 +83,7 @@ The file is validated when the server starts: wrong types, an invalid regular ex
 ### Endpoints
 
 - `GET /api/events?limit=60&cursor=...` - bounded pages of the event log, newest first. Only `ts`, `type`, `agent` and `project` cross the boundary; event payloads are never returned.
-- `GET /api/works?limit=60&cursor=...` - bounded pages of blocked work, newest first. The cursor is a keyset over the last row shown, so a queue that changes between pages neither hides nor repeats a row.
+- `GET /api/works?limit=60&cursor=...` - bounded pages of blocked work, newest first. The cursor tracks a position in the ordering, not a snapshot: rows inserted or moved ahead of the cursor can be missed in that walk, and previously returned rows moved behind it can be repeated.
 - `GET /`, `/app.js`, `/styles.css` - the static page and its assets.
 
 Safety properties: the server binds IPv4 loopback only; `Host` and `Origin` must be loopback; only `GET` is accepted; responses carry a restrictive `Content-Security-Policy`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`; pagination is bounded; and unknown paths return a plain 404 without reading files outside `dashboard/`.
@@ -101,7 +101,7 @@ The dashboard only reads, and only from `works`:
 | `pr_url` | TEXT | Returned only when it is `https://github.com/<owner>/<name>/pull/<number>` for a configured repository; the host is always `github.com` and any other host yields `null` |
 | `updated_at` | TEXT | ISO-8601 timestamp used for ordering and display |
 
-Rows are selected with `WHERE state = 'blocked'`, ordered newest first by the instant of `updated_at` (`julianday(updated_at)`, so timestamps with mixed offsets compare as times rather than as text), then issue number, then the row's `rowid`. Rows whose `updated_at` is missing or unparseable sort last and are still reachable. The page cursor is a keyset over that whole ordering of the last row shown, so rows that enter or leave the blocked queue between two pages neither hide a row nor show a duplicate; the cursor is opaque and carries no repository name. Any other table in that database is ignored.
+Rows are selected with `WHERE state = 'blocked'`, ordered newest first by the instant of `updated_at` (`julianday(updated_at)`, so timestamps with mixed offsets compare as times rather than as text), then issue number, then the row's `rowid`. Rows whose `updated_at` is missing or unparseable sort last and are still reachable. The page cursor is an opaque keyset over that whole ordering of the last row shown and carries no repository name. Each page reads the current database, so changes between requests can affect which rows a walk returns; start a fresh walk for an updated view. Any other table in that database is ignored.
 
 ## Tests
 
