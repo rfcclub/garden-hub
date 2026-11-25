@@ -4,7 +4,8 @@
   "type": "module",
   "description": "Garden Hub - local event log, collaboration MCP and wake bridge for coding agents",
   "scripts": {
-    "test": "node --test tools/ghub-log.test.mjs tools/ghub-mcp.test.mjs tools/ghub-dashboard.test.mjs",
+    "test": "node --test tools/ghub-log.test.mjs tools/ghub-mcp.test.mjs tools/ghub-watch-probe.test.mjs tools/ghub-dashboard.test.mjs",
+    "test:watch-probe": "node tools/ghub-watch-probe.mjs",
     "test:orca": "vitest run tests/garden-hub-collaboration-mcp/specs/garden-hub-collaboration-mcp.test.ts --maxWorkers=1 --no-file-parallelism",
     "test:wake": "vitest run tests/common-mcp-channel-wake/specs --maxWorkers=1 --no-file-parallelism",
     "test:wake:live-omp": "GHUB_TEST_LIVE_OMP=1 node --test tests/common-mcp-channel-wake/omp-native-smoke.mjs"

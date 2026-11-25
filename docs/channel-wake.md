@@ -12,7 +12,7 @@ Server configuration:
 | empty/unset (`auto`) | Choose per connection at `initialize` (default, see below) |
 | `off` | No notifications or watcher |
 | `common` | Require client `capabilities.experimental["garden-hub/channel-wake"] = {"version":1}` |
-| `codex` | Explicit bridge to trusted native `codex/user-input` |
+| `codex` | Explicit bridge to native `codex/user-input`; still requires the trusted-name opt-in below |
 | `omp` | Explicit bridge to the native OMP extension event |
 | `claude` | Explicit bridge to Claude Code channels (`notifications/claude/channel`) |
 
@@ -36,7 +36,7 @@ one client and must emit that client's notification shape. A second runtime can
 use its own process and configuration, but do not run Codex and OMP as competing
 `codex` consumers of the same inbox while validating delivery: both can see the
 same unacknowledged message and race to reply or acknowledge it. Claude Code
-currently uses pull-based inbox reads and has no wake adapter in this kit.
+uses the `claude` adapter described above.
 
 Common/OMP JSON-RPC notification:
 
@@ -50,6 +50,33 @@ key, not a path or instruction. Receivers still read `message_inbox`.
 Codex emits `{"jsonrpc":"2.0","method":"codex/user-input","params":{"text":"..."}}`
 where text is the fixed local `INBOX_INSTRUCTION`, never third-party message text.
 Its patched native allowlist must include exactly `garden-hub`.
+
+The Garden Hub side is opt-in, never default-on: the `codex` bridge is granted
+only when `GHUB_MCP_TRUSTED_CODEX_SERVER` is set to the exact trusted value
+`garden-hub`. `GHUB_MCP_SERVER_NAME` (the advertised `serverInfo.name`, default
+`garden-hub`) carries no trust: an unset or different trust env downgrades the
+`codex` adapter to no wake, so the process neither advertises the wake capability
+nor emits `codex/user-input`. The store and inbox keep working; mail is
+pull-only.
+
+What this does and does not prove. The trust env is read by the same operator who
+launches the process, so it records a deliberate opt-in and keeps a stock
+registration pull-only; it is not a defense against whoever chooses that
+registration's env. The enforcing boundary is the client's own gate: patched
+Codex accepts `codex/user-input` only from the MCP server it has registered as
+exactly `garden-hub`, and that registered-name allowlist is what stops a
+lookalike or unrelated server from producing a user turn. Configure the opt-in
+env on the process registered as `garden-hub`, and do not add other servers to
+that client-side allowlist.
+
+The opt-in covers the `codex` bridge only. It is not a global server-name policy:
+the `common`, `omp` and `claude` adapters still advertise the negotiated
+`garden-hub/channel-wake` capability and emit their own notification shape
+whatever `serverInfo.name` and the trust env say. Those paths are trusted
+entirely on the client side, so a deployment that relies on them must register
+the server as exactly `garden-hub` and filter the raw server name there (the OMP
+extension below does both). Garden Hub itself does not verify that a connecting
+client is who it claims, and it cannot tell an unrelated MCP server from this one.
 
 ## OMP
 
@@ -78,6 +105,35 @@ re-emits unacknowledged mail. A wake is best-effort: filesystem or notification
 errors go to stderr, and durable mail remains readable. This is not exactly-once
 delivery and does not prove that a model read or answered a message.
 
+### Host boundary
+
+Live wake is bounded by the host filesystem watcher. Some hosts accept
+`fs.watch` on the messages directory and never deliver a callback for later
+writes; Garden Hub #6 measured that on macOS arm64 with Node 22 and 26, while a
+standalone watcher failed the same way, so the limit is below this server.
+Arming a watcher is not a capability proof.
+
+On such a host the connection keeps startup and reconnect scanning but stays
+silent for live mail. That is a reported limitation, not durable-message loss:
+mail stays in the inbox and `message_inbox` still returns it. Keep the red
+acceptance result explicit instead of treating persistence as wake delivery.
+There is no polling fallback, daemon, or silent quarantine.
+
+Run the host probe before claiming live wake on a new machine:
+
+```sh
+npm run test:watch-probe
+```
+
+It writes one throwaway file into a private temporary directory and prints a
+JSON verdict (`supported`, `probeFile`, `probeWritten`, `events`, `errors`).
+Only a callback naming that written file counts: some macOS hosts emit a single
+`rename` for the watched directory while arming and then nothing, so "an event
+arrived" is not a capability proof. A non-zero exit reports
+`HOST_WATCH_BOUNDARY`. The probe is diagnostic only; it never reads the inbox
+and never changes the connection, and it is deliberately not part of
+`npm test`, which must stay green at this boundary.
+
 ## Acceptance
 
 Local tests cover contract and transport. Before archive, separately capture:
@@ -88,3 +144,8 @@ Local tests cover contract and transport. Before archive, separately capture:
 
 Keep these pending until runtime receipts exist. A process test is not a live
 conversation receipt.
+
+On a host whose probe reports `supported: false`, the live wake specs
+(`duplicate file events do not duplicate wake`, `live filesystem write wakes
+stdio`) stay red on purpose. Do not weaken or skip them; report the host
+boundary instead of counting persistence as wake delivery.

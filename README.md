@@ -110,6 +110,7 @@ npm install
 npm test            # event log, MCP and dashboard unit tests (node --test)
 npm run test:orca   # collaboration MCP spec tests
 npm run test:wake   # wake contract tests (offline)
+npm run test:watch-probe  # does this host's fs.watch deliver callbacks?
 ```
 
 ## Part of ANIMA

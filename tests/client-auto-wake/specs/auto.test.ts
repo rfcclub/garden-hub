@@ -24,7 +24,11 @@ function sender(dir: string, actor = "codex") {
 }
 function connect(dir: string, actor: string, wakeAdapter: string | undefined, params: any) {
   const frames: any[] = [];
-  const server = createMcpServer({ root: dir, actor, wakeAdapter, emitNotification: (f: any) => frames.push(f) });
+  const server = createMcpServer({
+    root: dir, actor, wakeAdapter,
+    trustedCodexServer: "garden-hub",
+    emitNotification: (f: any) => frames.push(f),
+  });
   cleanups.push(() => server.close?.());
   const init = server.handle({ jsonrpc: "2.0", id: 1, method: "initialize", params });
   server.handle({ jsonrpc: "2.0", method: "notifications/initialized" });
@@ -108,7 +112,12 @@ test("claude channel is advertised only for claude", () => {
 });
 
 function stdio(dir: string, actor: string) {
-  const env: Record<string, string> = { ...process.env as any, GHUB_MCP_STATE_DIR: dir, GHUB_MCP_ACTOR: actor };
+  const env: Record<string, string> = {
+    ...process.env as any,
+    GHUB_MCP_STATE_DIR: dir,
+    GHUB_MCP_ACTOR: actor,
+    GHUB_MCP_TRUSTED_CODEX_SERVER: "garden-hub",
+  };
   delete env.GHUB_MCP_WAKE_ADAPTER;
   const proc = spawn(process.execPath, ["tools/ghub-mcp-server.mjs"], { cwd: process.cwd(), env, stdio: ["pipe", "pipe", "pipe"] });
   const frames: any[] = [];
