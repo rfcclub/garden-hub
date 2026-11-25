@@ -383,6 +383,36 @@ test('SVC-PORT-2: --force must not replace an operator plist when the port is in
   }
 });
 
+// A PATH holding exactly the utilities `install` invokes and no node. The
+// earlier fixture spelled `"${bin}:/usr/bin:/bin"` to mean "node is absent",
+// which is false on any host that ships node under a system path: install then
+// found node and succeeded, and the test failed on valid product behaviour
+// rather than on the absence it meant to create. The tools are symlinked from
+// the host so the premise holds wherever the suite runs.
+const INSTALL_PATH_TOOLS = ['awk', 'cat', 'grep', 'id', 'mkdir'];
+
+function systemToolsPath(root) {
+  const dir = join(root, 'system-tools');
+  mkdirSync(dir, { recursive: true });
+  for (const tool of INSTALL_PATH_TOOLS) {
+    const found = (process.env.PATH || '')
+      .split(delimiter)
+      .filter(Boolean)
+      .map((candidate) => join(candidate, tool))
+      .find((candidate) => existsSync(candidate) && statSync(candidate).isFile());
+    assert.ok(found, `cannot locate ${tool} to build the isolated PATH`);
+    symlinkSync(found, join(dir, tool));
+  }
+  // Prove the absence instead of assuming it: a host that exposes node through
+  // one of these directories would otherwise weaken the test silently.
+  const probe = spawnSync('/bin/bash', ['-c', 'command -v node'], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${dir}${delimiter}${join(root, 'bin')}` },
+  });
+  assert.notEqual(probe.status, 0, `the isolated PATH must not expose node: ${probe.stdout.trim()}`);
+  return dir;
+}
+
 test('SVC-PORT-3: a missing node leaves no ~/Library behind', () => {
   // No fixture directory: the point is that install aborts before mkdir -p.
   const root = mkdtempSync(join(tmpdir(), 'ghub-service-node-'));
@@ -397,13 +427,14 @@ test('SVC-PORT-3: a missing node leaves no ~/Library behind', () => {
     writeFileSync(join(tools, 'ghub-dashboard.mjs'), '// test stub\n');
     writeFileSync(join(bin, 'launchctl'), '#!/bin/bash\nprintf "%s\\n" "$*" >> "$GHUB_TEST_LAUNCHCTL_LOG"\n');
     chmodSync(join(bin, 'launchctl'), 0o755);
+    const systemTools = systemToolsPath(root);
 
     const result = spawnSync('/bin/bash', [join(tools, 'service', 'ghub-service.sh'), 'install'], {
       encoding: 'utf8',
       env: {
         ...process.env,
         HOME: home,
-        PATH: `${bin}:/usr/bin:/bin`,
+        PATH: `${bin}${delimiter}${systemTools}`,
         GHUB_TEST_LAUNCHCTL_LOG: join(root, 'launchctl.log'),
       },
     });
