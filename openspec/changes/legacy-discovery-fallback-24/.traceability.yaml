@@ -1,0 +1,13 @@
+scenarios:
+  - scenario: the-client-shall-receive-a-method-not-found-for-discovery-and-complete-the-legacy-handshake-mcp-001-discovery-answers-generically-and-writes-nothing
+    test: tests/common-mcp-channel-wake/specs/discovery-fallback.test.ts
+    status: passing
+  - scenario: the-client-shall-receive-a-method-not-found-for-discovery-and-complete-the-legacy-handshake-mcp-002-fallback-reaches-tools-and-starts-wake
+    test: tests/common-mcp-channel-wake/specs/discovery-fallback.test.ts
+    status: passing
+  - scenario: the-client-shall-receive-a-method-not-found-for-discovery-and-complete-the-legacy-handshake-mcp-003-stdio-frame-order-keeps-the-fallback
+    test: tests/common-mcp-channel-wake/specs/discovery-fallback.test.ts
+    status: passing
+  - scenario: the-client-shall-receive-a-method-not-found-for-discovery-and-complete-the-legacy-handshake-mcp-004-a-wake-frame-before-a-delayed-reply-is-not-the-answer
+    test: tests/common-mcp-channel-wake/specs/discovery-fallback.test.ts
+    status: passing
