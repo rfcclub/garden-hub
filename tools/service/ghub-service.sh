@@ -156,10 +156,14 @@ function xesc(text,   out, i, ch) {
 
 render() {
   require_home
+  # `die` exits the subshell a command substitution creates, not the caller:
+  # under `plist="$(render)"` the non-zero status was dropped and `install`
+  # went on to write a plist with an empty port. Propagate each failure
+  # explicitly so the caller's `set -e` sees it.
   local node port log
-  node="$(resolve_node)"
-  port="$(resolve_port)"
-  log="$(log_dir)/garden-hub-dashboard.log"
+  node="$(resolve_node)" || return 1
+  port="$(resolve_port)" || return 1
+  log="$(log_dir)/garden-hub-dashboard.log" || return 1
   [ -f "${TEMPLATE}" ] || die "plist template not found: ${TEMPLATE}"
 
   # Every placeholder must be present, or the agent would launch without that
@@ -213,7 +217,9 @@ cmd_install() {
   check_dashboard
 
   local plist agent node
-  plist="$(render)"
+  # `render` already returns non-zero on a bad port or a missing node; say so
+  # here rather than relying on `set -e` to notice a bare assignment.
+  plist="$(render)" || die "cannot render plist; nothing written"
   agent="$(agent_path)"
 
   [ ! -L "${agent}" ] || die "${agent} is a symbolic link; refusing to install"

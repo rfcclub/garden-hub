@@ -226,7 +226,7 @@ test('SVC-010: status probes the port recorded in the installed plist', () => {
 
 // These tests use a copied script, a fake HOME and a fake launchctl. The
 // dashboard stub only satisfies the entry-point check; it is never executed.
-function makeInstallFixture({ race = false } = {}) {
+function makeInstallFixture({ race = false, extraEnv = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'ghub-service-test-'));
   const home = join(root, 'home');
   const repoTools = join(root, 'repo', 'tools');
@@ -267,6 +267,7 @@ function makeInstallFixture({ race = false } = {}) {
     GHUB_TEST_VICTIM: victim,
     GHUB_TEST_RACE_MARKER: marker,
     GHUB_TEST_REAL_NODE: process.execPath,
+    ...extraEnv,
   };
   return {
     root, agent, log, marker, victim,
@@ -346,5 +347,72 @@ test('SVC-SYMLINK-3: normal and forced regular installs retain their behavior', 
     assert.equal(readFileSync(f.log, 'utf8').split('\n').filter(line => line.startsWith('bootstrap ')).length, 2);
   } finally {
     f.cleanup();
+  }
+});
+
+// `die` inside a command substitution exits only the subshell, so an invalid
+// GHUB_DASHBOARD_PORT killed `resolve_port` while `render` went on with an
+// empty port and `install` loaded a plist that bound nothing.
+for (const port of ['5123O', '99999', '0', '-1', 'abc']) {
+  test(`SVC-PORT-1: install refuses GHUB_DASHBOARD_PORT=[${port}]`, () => {
+    const f = makeInstallFixture({ extraEnv: { GHUB_DASHBOARD_PORT: port } });
+    try {
+      const result = f.install();
+      assert.notEqual(result.status, 0, `install must fail for port=[${port}]`);
+      assert.match(result.stderr, /GHUB_DASHBOARD_PORT/, 'install must say why it refused');
+      assert.equal(existsSync(f.agent), false, 'no plist may be written');
+      assert.equal(existsSync(f.log), false, 'launchctl must not be called');
+    } finally {
+      f.cleanup();
+    }
+  });
+}
+
+test('SVC-PORT-2: --force must not replace an operator plist when the port is invalid', () => {
+  const f = makeInstallFixture({ extraEnv: { GHUB_DASHBOARD_PORT: '5123O' } });
+  try {
+    writeFileSync(f.agent, 'operator plist, hand-edited\n');
+    chmodSync(f.agent, 0o600);
+    const result = f.install('--force');
+    assert.notEqual(result.status, 0, 'a failed render must abort before the write');
+    assert.equal(readFileSync(f.agent, 'utf8'), 'operator plist, hand-edited\n');
+    assert.equal(statSync(f.agent).mode & 0o777, 0o600, 'mode must be preserved');
+    assert.equal(existsSync(f.log), false, 'launchctl must not be called');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('SVC-PORT-3: a missing node leaves no ~/Library behind', () => {
+  // No fixture directory: the point is that install aborts before mkdir -p.
+  const root = mkdtempSync(join(tmpdir(), 'ghub-service-node-'));
+  try {
+    const home = join(root, 'home');
+    const bin = join(root, 'bin');
+    const tools = join(root, 'repo', 'tools');
+    mkdirSync(home, { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(tools, { recursive: true });
+    cpSync(join(__dirname, 'service'), join(tools, 'service'), { recursive: true });
+    writeFileSync(join(tools, 'ghub-dashboard.mjs'), '// test stub\n');
+    writeFileSync(join(bin, 'launchctl'), '#!/bin/bash\nprintf "%s\\n" "$*" >> "$GHUB_TEST_LAUNCHCTL_LOG"\n');
+    chmodSync(join(bin, 'launchctl'), 0o755);
+
+    const result = spawnSync('/bin/bash', [join(tools, 'service', 'ghub-service.sh'), 'install'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${bin}:/usr/bin:/bin`,
+        GHUB_TEST_LAUNCHCTL_LOG: join(root, 'launchctl.log'),
+      },
+    });
+
+    assert.notEqual(result.status, 0, 'install must fail without node');
+    assert.match(result.stderr, /node/i);
+    assert.equal(existsSync(join(home, 'Library', 'LaunchAgents')), false, 'no LaunchAgents directory may be created');
+    assert.equal(existsSync(join(root, 'launchctl.log')), false, 'launchctl must not be called');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
