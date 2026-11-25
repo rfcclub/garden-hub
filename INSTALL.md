@@ -62,6 +62,15 @@ Do not register a second conflicting `garden-hub` entry in another scope.
 | Stock Codex | MCP tools | Hint is sent; do not assume stock Codex acts on it |
 | OMP + bundled extension | Yes, actor `codex` | Automatic (`omp`); extension must be loaded |
 | Other stdio MCP clients | Subject to client MCP support | Automatic only if the client negotiates `common`; otherwise pull |
+| Clients that open with a discovery request | Yes, if the client falls back to `initialize` | Pull-only unless it also negotiates `common` |
+
+The server speaks the 2025 initialization lifecycle (`initialize`, then
+`notifications/initialized`). A client that opens with `server/discover` receives
+a generic `-32601 method not found` and must fall back to `initialize`; that
+fallback is load-bearing, and a client that supports only the newer lifecycle and
+will not initialise is unsupported. Tools may still work in that case, but wake
+does not start. Details and the pinned regression test are in
+[docs/channel-wake.md](docs/channel-wake.md#handshake).
 
 Leave `GHUB_MCP_WAKE_ADAPTER` unset: the server picks the wake path from the
 client that connects (`clientInfo.name` `Claude Code`, `codex-mcp-client`,
