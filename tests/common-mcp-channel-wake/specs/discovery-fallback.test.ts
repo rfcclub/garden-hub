@@ -150,24 +150,58 @@ test('[the-client-shall-receive-a-method-not-found-for-discovery-and-complete-th
   const message = peer(dir).sendMessage({ to: 'claude-code', body: 'wire body' });
   const client = stdio(dir, 'claude-code');
 
-  client.send(discovery);
-  client.send(initialize);
-  client.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
-  client.send({ jsonrpc: '2.0', id: 3, method: 'tools/list' });
-
-  const reply = async (id: number) => {
-    await expect.poll(() => client.frames.some((frame) => frame.id === id)).toBe(true);
-    return client.frames.find((frame) => frame.id === id);
+  // One request in flight at a time: a real client cannot fall back to
+  // `initialize` before it has seen the discovery reply, and this spec should
+  // fail if that dependency is ever broken rather than race it away.
+  const request = async (frame: any) => {
+    const before = client.frames.length;
+    client.send(frame);
+    await expect.poll(() => client.frames.length > before).toBe(true);
+    const replies = client.frames.slice(before).filter((f: any) => f.id === frame.id);
+    expect(replies).toHaveLength(1);
+    return replies[0];
   };
 
-  expect((await reply(1)).error.code).toBe(-32601);
-  expect((await reply(2)).result.protocolVersion).toBe('2025-11-25');
-  expect((await reply(3)).result.tools.length).toBeGreaterThan(0);
+  expect(client.frames).toEqual([]);
+  const discoveryReply = await request(discovery);
+  expect(discoveryReply.result).toBeUndefined();
+  expect(discoveryReply.error.code).toBe(-32601);
+  expect(discoveryReply.error.message).toBe('method not found: server/discover');
+  // Nothing was published off a frame that created no session.
+  expect(client.frames.filter((f: any) => f.method === WAKE_METHOD)).toEqual([]);
 
-  await expect.poll(() => client.frames.some((frame) => frame.method === WAKE_METHOD)).toBe(true);
-  const wake = client.frames.filter((frame) => frame.method === WAKE_METHOD);
+  const initializeReply = await request(initialize);
+  expect(initializeReply.result.protocolVersion).toBe('2025-11-25');
+  expect(initializeReply.result.serverInfo.name).toBe('garden-hub');
+  expect(initializeReply.result.capabilities.experimental[WAKE_CAPABILITY]).toEqual({ version: 1 });
+
+  const initializedAt = client.frames.length;
+  client.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+
+  const listReply = await request({ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} });
+  expect(listReply.result.tools.map((tool: { name: string }) => tool.name)).toContain('message_inbox');
+
+  const inboxReply = await request({
+    jsonrpc: '2.0',
+    id: 4,
+    method: 'tools/call',
+    params: { name: 'message_inbox', arguments: {} },
+  });
+  expect(JSON.parse(inboxReply.result.content[0].text).map((m: { id: string }) => m.id)).toEqual([message.id]);
+
+  await expect.poll(() => client.frames.some((f: any) => f.method === WAKE_METHOD)).toBe(true);
+
+  const wake = client.frames.filter((f: any) => f.method === WAKE_METHOD);
   expect(wake).toHaveLength(1);
-  expect(wake[0].params.messageId).toBe(message.id);
+  expect(wake[0].params).toEqual({ version: 1, recipient: 'claude-code', messageId: message.id });
   expect(JSON.stringify(wake)).not.toContain('wire body');
+
+  // Order on the wire: no wake before the client confirms initialization, then
+  // exactly one wake, and the replies keep the order the client asked in.
+  const wakeAt = client.frames.findIndex((f: any) => f.method === WAKE_METHOD);
+  expect(wakeAt).toBeGreaterThanOrEqual(initializedAt);
+  const ids = client.frames.filter((f: any) => f.id !== undefined).map((f: any) => f.id);
+  expect(ids).toEqual([1, 2, 3, 4]);
+
   expect(client.errors).toEqual([]);
 });

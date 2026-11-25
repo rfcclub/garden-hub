@@ -62,7 +62,7 @@ Do not register a second conflicting `garden-hub` entry in another scope.
 | Stock Codex | MCP tools | Hint is sent; do not assume stock Codex acts on it |
 | OMP + bundled extension | Yes, actor `codex` | Automatic (`omp`); extension must be loaded |
 | Other stdio MCP clients | Subject to client MCP support | Automatic only if the client negotiates `common`; otherwise pull |
-| Clients that open with a discovery request | Yes, if the client falls back to `initialize` | Pull-only unless it also negotiates `common` |
+| Clients that open with a discovery request | Yes, if the client falls back to `initialize` | Unchanged by the discovery request: automatic for a client that negotiates `common` or whose `clientInfo.name` matches a known adapter (`Claude Code`, `codex-mcp-client`, `omp-coding-agent`) once that adapter's own trust and setup conditions are met; otherwise pull |
 
 The server speaks the 2025 initialization lifecycle (`initialize`, then
 `notifications/initialized`). A client that opens with `server/discover` receives
