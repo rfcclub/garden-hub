@@ -122,6 +122,22 @@ test('[the-client-shall-receive-a-method-not-found-for-discovery-and-complete-th
   expect(errors).toEqual([]);
 });
 
+// The client-side shape of the fallback: wait for the reply that answers this
+// id. A wake notification is a legal frame at any point after the client
+// confirms initialization, and stdout writes are not ordered against the request
+// queue, so "a new frame arrived" is not the same as "my reply arrived". Waiting
+// on frame count instead of on the id is how the delayed-reply race hides: the
+// wake lands first, the reply is still in flight, and the caller treats the
+// envelope as the answer.
+type Frame = { [key: string]: any };
+
+async function awaitReply(frames: Frame[], id: number) {
+  await expect.poll(() => frames.filter((frame) => frame.id === id).length > 0).toBe(true);
+  const replies = frames.filter((frame) => frame.id === id);
+  expect(replies).toHaveLength(1);
+  return replies[0];
+}
+
 function stdio(dir: string, actor: string) {
   const env: Record<string, string> = {
     ...process.env as Record<string, string>,
@@ -154,12 +170,8 @@ test('[the-client-shall-receive-a-method-not-found-for-discovery-and-complete-th
   // `initialize` before it has seen the discovery reply, and this spec should
   // fail if that dependency is ever broken rather than race it away.
   const request = async (frame: any) => {
-    const before = client.frames.length;
     client.send(frame);
-    await expect.poll(() => client.frames.length > before).toBe(true);
-    const replies = client.frames.slice(before).filter((f: any) => f.id === frame.id);
-    expect(replies).toHaveLength(1);
-    return replies[0];
+    return awaitReply(client.frames, frame.id);
   };
 
   expect(client.frames).toEqual([]);
@@ -204,4 +216,22 @@ test('[the-client-shall-receive-a-method-not-found-for-discovery-and-complete-th
   expect(ids).toEqual([1, 2, 3, 4]);
 
   expect(client.errors).toEqual([]);
+});
+
+test('[the-client-shall-receive-a-method-not-found-for-discovery-and-complete-the-legacy-handshake-mcp-004-a-wake-frame-before-a-delayed-reply-is-not-the-answer]', async () => {
+  // Deterministic ordering, no wall clock: the wake frame is already present and
+  // the reply to the request arrives only afterwards. This is the shape a slow
+  // stdout write produces in a real session, pinned without its timing.
+  const frames: Frame[] = [
+    { jsonrpc: '2.0', method: WAKE_METHOD, params: { version: 1, recipient: 'claude-code', messageId: 'pending-message' } },
+  ];
+  queueMicrotask(() => frames.push({ jsonrpc: '2.0', id: 9, result: { tools: [] } }));
+
+  const reply = await awaitReply(frames, 9);
+
+  expect(reply.id).toBe(9);
+  expect(reply.result).toEqual({ tools: [] });
+  // The wake was waited past, not consumed: it is still one envelope on the wire.
+  expect(frames.filter((frame) => frame.method === WAKE_METHOD)).toHaveLength(1);
+  expect(frames).toHaveLength(2);
 });

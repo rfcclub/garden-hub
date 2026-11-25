@@ -62,14 +62,16 @@ Do not register a second conflicting `garden-hub` entry in another scope.
 | Stock Codex | MCP tools | Hint is sent; do not assume stock Codex acts on it |
 | OMP + bundled extension | Yes, actor `codex` | Automatic (`omp`); extension must be loaded |
 | Other stdio MCP clients | Subject to client MCP support | Automatic only if the client negotiates `common`; otherwise pull |
-| Clients that open with a discovery request | Yes, if the client falls back to `initialize` | Unchanged by the discovery request: automatic for a client that negotiates `common` or whose `clientInfo.name` matches a known adapter (`Claude Code`, `codex-mcp-client`, `omp-coding-agent`) once that adapter's own trust and setup conditions are met; otherwise pull |
+| Clients that open with a discovery request | Yes, with or without a handshake | Unchanged by the discovery request: automatic for a client that negotiates `common` or whose `clientInfo.name` matches a known adapter (`Claude Code`, `codex-mcp-client`, `omp-coding-agent`) once that adapter's own trust and setup conditions are met; otherwise pull |
 
 The server speaks the 2025 initialization lifecycle (`initialize`, then
 `notifications/initialized`). A client that opens with `server/discover` receives
 a generic `-32601 method not found` and must fall back to `initialize`; that
 fallback is load-bearing, and a client that supports only the newer lifecycle and
-will not initialise is unsupported. Tools may still work in that case, but wake
-does not start. Details and the pinned regression test are in
+will not initialise is unsupported. The split is tools versus wake, not tools
+versus nothing: `tools/list` and `tools/call` are answered without any handshake,
+so mail is readable even from a client that never initialises; only wake needs
+the handshake. Details and the pinned regression test are in
 [docs/channel-wake.md](docs/channel-wake.md#handshake).
 
 Leave `GHUB_MCP_WAKE_ADAPTER` unset: the server picks the wake path from the
