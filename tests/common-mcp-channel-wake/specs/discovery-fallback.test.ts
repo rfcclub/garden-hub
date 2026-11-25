@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -23,6 +23,7 @@ import { WAKE_CAPABILITY, WAKE_METHOD } from '../../../tools/ghub-mcp-wake.mjs';
 const cleanups: (() => void)[] = [];
 afterEach(() => {
   while (cleanups.length) cleanups.pop()!();
+  vi.unstubAllEnvs();
 });
 
 function root() {
@@ -42,6 +43,7 @@ function connection(dir: string) {
     root: dir,
     actor: 'claude-code',
     wakeAdapter: 'common',
+    serverName: 'garden-hub',
     emitNotification: (frame: unknown) => frames.push(frame),
     onWakeError: (error: Error) => errors.push(error.message),
   });
@@ -144,6 +146,7 @@ function stdio(dir: string, actor: string) {
     GHUB_MCP_STATE_DIR: dir,
     GHUB_MCP_ACTOR: actor,
     GHUB_MCP_PEERS: 'codex,claude-code',
+    GHUB_MCP_SERVER_NAME: 'garden-hub',
   };
   delete env.GHUB_MCP_WAKE_ADAPTER;
   const proc = spawn(process.execPath, ['tools/ghub-mcp-server.mjs'], {
@@ -160,6 +163,20 @@ function stdio(dir: string, actor: string) {
   const send = (frame: unknown) => proc.stdin.write(`${JSON.stringify(frame)}\n`);
   return { frames, errors, send };
 }
+
+test('regression: in-process fixture ignores the configured server name', () => {
+  vi.stubEnv('GHUB_MCP_SERVER_NAME', 'operator-configured-name');
+  const { server } = connection(root());
+  expect(server.handle(initialize).result.serverInfo.name).toBe('garden-hub');
+});
+
+test('regression: stdio fixture ignores the configured server name', async () => {
+  vi.stubEnv('GHUB_MCP_SERVER_NAME', 'operator-configured-name');
+  const client = stdio(root(), 'claude-code');
+  client.send(initialize);
+  const reply = await awaitReply(client.frames, initialize.id);
+  expect(reply.result.serverInfo.name).toBe('garden-hub');
+});
 
 test('[the-client-shall-receive-a-method-not-found-for-discovery-and-complete-the-legacy-handshake-mcp-003-stdio-frame-order-keeps-the-fallback]', async () => {
   const dir = root();
