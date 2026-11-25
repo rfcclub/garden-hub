@@ -1,0 +1,16 @@
+scenarios:
+  - scenario: do-not-follow-an-installation-destination-link-existing-symbolic-link
+    test: tools/ghub-service.test.mjs
+    status: passing
+  - scenario: do-not-follow-an-installation-destination-link-link-swapped-after-the-pre-check
+    test: tools/ghub-service.test.mjs
+    status: passing
+  - scenario: do-not-follow-an-installation-destination-link-regular-destination
+    test: tools/ghub-service.test.mjs
+    status: passing
+  - scenario: exercise-the-configured-dashboard-port-a-calling-environment-has-a-different-port
+    test: tools/ghub-service.test.mjs
+    status: passing
+  - scenario: exercise-the-configured-dashboard-port-a-rendered-plist-has-an-extra-port
+    test: tools/ghub-service.test.mjs
+    status: passing
