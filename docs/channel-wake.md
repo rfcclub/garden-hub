@@ -96,6 +96,35 @@ OMP's existing manager/runner buffers notifications during startup.
 Do not configure Codex and OMP to consume the same actor's inbox simultaneously
 when proving which session handled a message: both connections can see a hint.
 
+## Handshake
+
+This server speaks the **2025 initialization lifecycle**: `initialize`, then
+`notifications/initialized`, and the wake path starts on that confirmation.
+
+A client that opens with a discovery request instead (`server/discover`) gets a
+generic error — `{"code":-32601,"message":"method not found: server/discover"}`
+— and is expected to **fall back to `initialize`**. That fallback is
+load-bearing and the code stays a generic method-not-found on purpose: it is what
+clients fall back on, and converting it into a modern "unsupported protocol
+version" response is a different contract with different client handling.
+
+Two consequences worth stating plainly:
+
+- `-32601` is a generic method-not-found. It does not prove a version mismatch,
+  and nothing here claims it does.
+- A client that treats that error as fatal, or that supports only the newer
+  lifecycle and will not initialise, is **unsupported**. Do not answer discovery
+  "for compatibility": a successful discovery result identifies the server as a
+  modern server, and a modern client may then use per-request metadata and never
+  send `initialize` or `notifications/initialized`. Tools would keep working and
+  **wake would stop**, which is worse than a loud error.
+
+`tests/common-mcp-channel-wake/specs/discovery-fallback.test.ts` pins the
+existing behaviour: discovery → `-32601` → `initialize` → `notifications/initialized`
+→ `tools/list` and `tools/call` succeed → wake is published. It is a synthetic
+protocol client, in-process and over a stdio pipe; a specific third-party
+client's real fallback behaviour is a host check, not part of `npm test`.
+
 ## Lifecycle and limits
 
 The server watches its local messages directory, then scans at startup and on
