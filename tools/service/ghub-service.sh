@@ -71,6 +71,11 @@ resolve_port() {
   case "${port}" in
     ''|*[!0-9]*) die "GHUB_DASHBOARD_PORT must be a number, got: ${port}" ;;
   esac
+  # The dashboard reads 09123 as 9123 while `status` would probe 09123; accept
+  # only the canonical spelling so both sides agree on one port.
+  case "${port}" in
+    0*) die "GHUB_DASHBOARD_PORT must not start with 0, got: ${port}" ;;
+  esac
   [ "${port}" -ge 1 ] && [ "${port}" -le 65535 ] ||
     die "GHUB_DASHBOARD_PORT is out of range: ${port}"
   printf '%s\n' "${port}"
@@ -234,16 +239,24 @@ cmd_install() {
   mkdir -p "$(agent_dir)" "$(log_dir)"
   node="$(resolve_node)"
   # The pre-check alone cannot prevent a link from being swapped in later.
-  # Open without following the final path component, then write and chmod the
-  # descriptor so neither operation can be redirected through a symlink.
+  # Open without following the final path component and without truncating,
+  # then check the descriptor: a hard link shares its inode with another file,
+  # which O_NOFOLLOW does not stop, so refuse anything but a regular file with a
+  # single link before truncating, writing and chmodding that descriptor.
   printf '%s\n' "${plist}" | "${node}" -e '
     const fs = require("node:fs");
     const flags = fs.constants;
     if (typeof flags.O_NOFOLLOW !== "number") throw new Error("O_NOFOLLOW is unavailable");
     const data = fs.readFileSync(0);
-    const fd = fs.openSync(process.argv[1], flags.O_WRONLY | flags.O_CREAT | flags.O_TRUNC | flags.O_NOFOLLOW, 0o644);
-    try { fs.writeFileSync(fd, data); fs.fchmodSync(fd, 0o644); }
-    finally { fs.closeSync(fd); }
+    const fd = fs.openSync(process.argv[1], flags.O_WRONLY | flags.O_CREAT | flags.O_NOFOLLOW, 0o644);
+    try {
+      const st = fs.fstatSync(fd);
+      if (!st.isFile()) throw new Error("destination is not a regular file");
+      if (st.nlink !== 1) throw new Error("destination has " + st.nlink + " hard links; refusing to write through them");
+      fs.ftruncateSync(fd, 0);
+      fs.writeFileSync(fd, data);
+      fs.fchmodSync(fd, 0o644);
+    } finally { fs.closeSync(fd); }
   ' "${agent}" || die "cannot safely write ${agent}"
 
   # Replace a previously loaded copy so the new one takes effect.

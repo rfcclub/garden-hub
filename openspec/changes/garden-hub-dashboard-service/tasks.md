@@ -26,6 +26,16 @@
 - [x] **Step 2: GREEN** Clear the inherited port in the test helper before applying explicit overrides, and extract the rendered XML numeric strings as well as colon/equals-prefixed port values. Require the only unique port to be the explicit dashboard port.
 - [ ] **Step 3: Verify** Run `env GHUB_DASHBOARD_PORT=51235 npm test` and `node openspec/changes/garden-hub-dashboard-service/port-mutation-probe.mjs <variant>` for each of `numeric`, `colon`, `equals`, `numeric-short`, `colon-short`, and `equals-short`. Run `orca verify`, `orca gate-plan`, and `orca gate-code`; preserve all failures and warnings.
 
+### Task 3: Refuse hard-linked destinations and leading-zero ports (review follow-up)
+
+**Files:**
+- Modify: `tools/service/ghub-service.sh`
+- Test: `tools/ghub-service.test.mjs`
+
+- [x] **Step 1: RED** Add SVC-HARDLINK-1 (pre-existing hard link, with and without `--force`), SVC-HARDLINK-2 (hard link inserted after the pre-check) and SVC-PORT-4 (leading-zero ports). Five of the seven focused cases failed: a forced install rewrote the linked file, and `09123`, `00080` and `065535` were accepted.
+- [x] **Step 2: GREEN** Open the destination without `O_TRUNC`, refuse a non-regular file or a link count other than one on the descriptor, then truncate, write and chmod; reject a port that starts with 0.
+- [x] **Step 3: Verify** Full `npm test`, `npm run test:orca`, `npm run test:wake`, and `SVC-003` with an inherited non-default port.
+
 ## Verification
 - [x] All relevant executable tests pass in the isolated fixture.
 - [x] Existing regular-file and force behavior remains intact.
