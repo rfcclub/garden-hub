@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -226,7 +226,7 @@ test('SVC-010: status probes the port recorded in the installed plist', () => {
 
 // These tests use a copied script, a fake HOME and a fake launchctl. The
 // dashboard stub only satisfies the entry-point check; it is never executed.
-function makeInstallFixture({ race = false, extraEnv = {} } = {}) {
+function makeInstallFixture({ race = false, raceLink = 'symbolic', extraEnv = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'ghub-service-test-'));
   const home = join(root, 'home');
   const repoTools = join(root, 'repo', 'tools');
@@ -249,7 +249,9 @@ function makeInstallFixture({ race = false, extraEnv = {} } = {}) {
     writeFileSync(node, [
       '#!/bin/bash',
       'if [ "${1:-}" = "-e" ]; then',
-      '  ln -s "$GHUB_TEST_VICTIM" "$GHUB_TEST_AGENT"',
+      raceLink === 'hard'
+        ? '  ln "$GHUB_TEST_VICTIM" "$GHUB_TEST_AGENT"'
+        : '  ln -s "$GHUB_TEST_VICTIM" "$GHUB_TEST_AGENT"',
       '  printf "injected\\n" > "$GHUB_TEST_RACE_MARKER"',
       'fi',
       'exec "$GHUB_TEST_REAL_NODE" "$@"',
@@ -447,3 +449,62 @@ test('SVC-PORT-3: a missing node leaves no ~/Library behind', () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+// A hard link at the destination shares its inode with another file, so
+// O_NOFOLLOW does not stop a forced install from rewriting that file and
+// forcing its mode to 0644. Refuse any destination with more than one link,
+// whether it was there before the install or appeared after the pre-check.
+for (const force of [false, true]) {
+  test(`SVC-HARDLINK-1: refuse a hard-linked destination${force ? ' with --force' : ''}`, () => {
+    const f = makeInstallFixture();
+    try {
+      writeFileSync(f.victim, 'unrelated file\n');
+      chmodSync(f.victim, 0o600);
+      linkSync(f.victim, f.agent);
+      const result = force ? f.install('--force') : f.install();
+      assert.notEqual(result.status, 0, 'install must refuse a hard-linked destination');
+      assert.equal(readFileSync(f.victim, 'utf8'), 'unrelated file\n', 'the linked file must keep its contents');
+      assert.equal(statSync(f.victim).mode & 0o777, 0o600, 'the linked file must keep its mode');
+      assert.equal(existsSync(f.log), false, 'launchctl must not be called');
+    } finally {
+      f.cleanup();
+    }
+  });
+}
+
+test('SVC-HARDLINK-2: refuse a hard link inserted between the check and open', () => {
+  const f = makeInstallFixture({ race: true, raceLink: 'hard' });
+  try {
+    writeFileSync(f.victim, 'unrelated file\n');
+    chmodSync(f.victim, 0o600);
+    const result = f.install();
+    assert.equal(readFileSync(f.marker, 'utf8'), 'injected\n', 'the race hook must have run');
+    assert.notEqual(result.status, 0, 'install must refuse the inserted hard link');
+    assert.equal(readFileSync(f.victim, 'utf8'), 'unrelated file\n', 'the linked file must keep its contents');
+    assert.equal(statSync(f.victim).mode & 0o777, 0o600, 'the linked file must keep its mode');
+    assert.equal(existsSync(f.log), false, 'launchctl must not be called');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// The dashboard parses 09123 as 9123 while status probed 127.0.0.1:09123, so
+// the two disagreed about the port. A port is written without leading zeros.
+for (const port of ['09123', '00080', '065535']) {
+  test(`SVC-PORT-4: print and install refuse a leading-zero port [${port}]`, () => {
+    const printed = runPrint({ env: { GHUB_DASHBOARD_PORT: port } });
+    assert.notEqual(printed.status, 0, `print must fail for port=[${port}]`);
+    assert.match(printed.stderr, /GHUB_DASHBOARD_PORT/);
+    const f = makeInstallFixture({ extraEnv: { GHUB_DASHBOARD_PORT: port } });
+    try {
+      const result = f.install();
+      assert.notEqual(result.status, 0, `install must fail for port=[${port}]`);
+      assert.match(result.stderr, /GHUB_DASHBOARD_PORT/);
+      assert.equal(existsSync(f.agent), false, 'no plist may be written');
+      assert.equal(existsSync(f.log), false, 'launchctl must not be called');
+    } finally {
+      f.cleanup();
+    }
+  });
+}
