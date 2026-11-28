@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createPublicKey, createVerify, generateKeyPairSync } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +15,7 @@ import {
   submitReview,
   mergePullRequest,
 } from './ghub-mcp-github.mjs';
+import { createGithubAppAuth, createAppJwt } from './ghub-mcp-github-app.mjs';
 import { createMcpServer } from './ghub-mcp-server.mjs';
 
 const SERVER = fileURLToPath(new URL('./ghub-mcp-server.mjs', import.meta.url));
@@ -267,6 +269,7 @@ test('MCP tools complete initialize and discovery without non-protocol state', (
       'message_inbox',
       'message_ack',
       'message_reply',
+      'github_identity',
       'pr_watch',
       'pr_create',
       'pr_poll',
@@ -354,5 +357,368 @@ test('README documents both client registrations and the actor boundary', () => 
   assert.match(readme, /claude mcp add garden-hub/);
   assert.match(readme, /GHUB_MCP_ACTOR/);
   assert.match(readme, /restart/i);
-  assert.match(readme, /does not cryptographically distinguish/i);
+  assert.match(readme, /does not distinguish one client from another/i);
+  assert.match(readme, /GHUB_MCP_GITHUB_APP_ID/);
+  assert.match(readme, /never fall back to the host `gh` login/i);
+});
+
+// --- GitHub App identity for write tools -------------------------------------
+
+function appConfigured() {
+  const fakeToken = 'ghs_installationtokenvalue0001';
+  const calls = [];
+  const githubApp = {
+    describe: () => ({
+      githubApp: {
+        configured: true,
+        appId: '1234',
+        slug: 'garden-agent-codex',
+        noreply: '1234+garden-agent-codex@users.noreply.github.com',
+        requiredPermissions: { contents: 'write', pull_requests: 'write' },
+      },
+    }),
+    mintToken: async ({ repo }) => {
+      calls.push(repo);
+      return fakeToken;
+    },
+  };
+  return { githubApp, fakeToken, calls };
+}
+
+test('APP-001: pr_create writes with the app token and never returns it', async () => {
+  const root = stateRoot();
+  const { githubApp, fakeToken, calls } = appConfigured();
+  const seen = [];
+  const server = createMcpServer({
+    root,
+    actor: 'codex',
+    peers: ['codex', 'claude-code'],
+    githubApp,
+    github: {
+      createPullRequest: (args) => {
+        seen.push(args);
+        return {
+          repo: args.repo,
+          number: 7,
+          url: 'https://github.com/example-org/garden-hub/pull/7',
+        };
+      },
+      getPullRequestSnapshot: () => snapshot(),
+      mergePullRequest: () => ({ ok: true }),
+      parsePullRequestUrl: () => {
+        throw new Error('not used');
+      },
+      pollWatch: ({ store, watch, snapshot: current }) => {
+        const saved = store.saveWatch({ ...watch, lastHeadSha: current.head });
+        return { state: saved.state, watch: saved };
+      },
+      submitReview: () => ({ ok: true }),
+    },
+  });
+
+  const reply = await server.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'pr_create',
+      arguments: { repo: 'example-org/garden-hub', head: 'feature', base: 'main', title: 'Feature' },
+    },
+  });
+
+  assert.equal(reply.result.isError, undefined);
+  assert.deepEqual(calls, ['example-org/garden-hub']);
+  assert.deepEqual(seen[0].env, { GH_TOKEN: fakeToken });
+  assert.doesNotMatch(reply.result.content[0].text, new RegExp(fakeToken));
+});
+
+test('APP-002: a write without an app configuration fails closed and writes nothing', async () => {
+  const root = stateRoot();
+  const server = createMcpServer({
+    root,
+    actor: 'codex',
+    peers: ['codex', 'claude-code'],
+    githubApp: {
+      describe: () => ({ githubApp: { configured: false } }),
+      mintToken: async () => {
+        throw new Error('GitHub App identity is not configured for this agent');
+      },
+    },
+    github: {
+      createPullRequest: () => {
+        throw new Error('a write must not run without an app token');
+      },
+      getPullRequestSnapshot: () => {
+        throw new Error('a write must not run without an app token');
+      },
+      mergePullRequest: () => {
+        throw new Error('a write must not run without an app token');
+      },
+      parsePullRequestUrl: () => {
+        throw new Error('not used');
+      },
+      pollWatch: () => {
+        throw new Error('a write must not run without an app token');
+      },
+      submitReview: () => {
+        throw new Error('a write must not run without an app token');
+      },
+    },
+  });
+
+  const reply = await server.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'pr_create',
+      arguments: { repo: 'example-org/garden-hub', head: 'feature', base: 'main', title: 'Feature' },
+    },
+  });
+
+  assert.equal(reply.result.isError, true);
+  assert.match(JSON.parse(reply.result.content[0].text).error, /not configured/i);
+  assert.deepEqual(readdirSync(root), []);
+});
+
+test('APP-003: a failed write never surfaces the minted token', async () => {
+  const root = stateRoot();
+  const { githubApp, fakeToken } = appConfigured();
+  const server = createMcpServer({
+    root,
+    actor: 'codex',
+    peers: ['codex', 'claude-code'],
+    githubApp,
+    github: {
+      createPullRequest: (args) => {
+        throw new Error(`gh failed with authorization: token ${args.env.GH_TOKEN}`);
+      },
+      getPullRequestSnapshot: () => snapshot(),
+      mergePullRequest: () => ({ ok: true }),
+      parsePullRequestUrl: () => {
+        throw new Error('not used');
+      },
+      pollWatch: ({ watch }) => ({ state: 'awaiting_review', watch }),
+      submitReview: () => ({ ok: true }),
+    },
+  });
+
+  const reply = await server.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'pr_create',
+      arguments: { repo: 'example-org/garden-hub', head: 'feature', base: 'main', title: 'Feature' },
+    },
+  });
+
+  assert.equal(reply.result.isError, true);
+  assert.doesNotMatch(reply.result.content[0].text, new RegExp(fakeToken));
+  assert.doesNotMatch(JSON.stringify(reply), /gh[sru]_[A-Za-z0-9]{8,}/);
+});
+
+test('APP-004: github_identity reports the app actor without a token', () => {
+  const root = stateRoot();
+  const { githubApp, fakeToken } = appConfigured();
+  const server = createMcpServer({ root, actor: 'codex', peers: ['codex', 'claude-code'], githubApp });
+
+  const reply = server.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: { name: 'github_identity', arguments: {} },
+  });
+
+  assert.equal(reply.result.isError, undefined);
+  const identity = JSON.parse(reply.result.content[0].text);
+  assert.equal(identity.actor, 'codex');
+  assert.equal(identity.githubApp.configured, true);
+  assert.equal(identity.githubApp.slug, 'garden-agent-codex');
+  assert.doesNotMatch(JSON.stringify(identity), new RegExp(fakeToken));
+  assert.deepEqual(readdirSync(root), []);
+});
+
+// --- GitHub App auth module --------------------------------------------------
+
+function appKeyPair() {
+  return generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({
+    type: 'pkcs1',
+    format: 'pem',
+  });
+}
+
+test('APP-005: the app JWT is signed with the app key and never contains a token', () => {
+  const privateKey = appKeyPair();
+  const jwt = createAppJwt({ appId: '1234', privateKey, now: () => 1_700_000_000_000 });
+  const [header, payload, signature] = jwt.split('.');
+  assert.deepEqual(JSON.parse(Buffer.from(header, 'base64url').toString()), { alg: 'RS256', typ: 'JWT' });
+  const claims = JSON.parse(Buffer.from(payload, 'base64url').toString());
+  assert.equal(claims.iss, '1234');
+  assert.equal(claims.iat, 1_699_999_940);
+  assert.equal(claims.exp, 1_700_000_480);
+  const verifier = createVerify('RSA-SHA256');
+  verifier.update(`${header}.${payload}`);
+  assert.equal(verifier.verify(createPublicKey(privateKey), Buffer.from(signature, 'base64url'), 'base64url'), true);
+  assert.doesNotMatch(jwt, /gh[sru]_[A-Za-z0-9]{8,}/);
+});
+
+test('APP-006: an agent without an app configuration refuses before any GitHub call', async () => {
+  const requested = [];
+  const auth = createGithubAppAuth({
+    env: {},
+    fetchImpl: (...args) => {
+      requested.push(args);
+      throw new Error('offline');
+    },
+  });
+  assert.deepEqual(auth.describe().githubApp.configured, false);
+  await assert.rejects(auth.mintToken({ repo: 'example-org/garden-hub' }), (error) => {
+    assert.match(error.message, /not configured/i);
+    assert.match(error.message, /GHUB_MCP_GITHUB_APP_ID/);
+    assert.match(error.message, /fall back/i);
+    return true;
+  });
+  assert.deepEqual(requested, []);
+});
+
+test('APP-007: minting names a missing installation permission and never leaks the token', () => {
+  const fakeToken = 'ghs_installationtokenvalue0002';
+  const responses = [
+    new Response(JSON.stringify({ id: 99 }), { status: 200 }),
+    new Response(JSON.stringify({ token: fakeToken, permissions: { contents: 'read' } }), { status: 200 }),
+  ];
+  const calls = [];
+  const auth = createGithubAppAuth({
+    env: {
+      GHUB_MCP_GITHUB_APP_ID: '1234',
+      GHUB_MCP_GITHUB_APP_PRIVATE_KEY_FILE: '/keys/app.pem',
+      GHUB_MCP_GITHUB_APP_SLUG: 'garden-agent-codex',
+    },
+    readFile: () => appKeyPair(),
+    fetchImpl: (url, options) => {
+      calls.push({ url, options });
+      return Promise.resolve(responses.shift());
+    },
+  });
+
+  return auth.mintToken({ repo: 'example-org/garden-hub' }).then(
+    () => assert.fail('minting must fail when a permission is missing'),
+    (error) => {
+      assert.match(error.message, /missing a required permission/i);
+      assert.match(error.message, /Contents: write/);
+      assert.match(error.message, /Pull requests: write/);
+      assert.doesNotMatch(error.message, new RegExp(fakeToken));
+      assert.equal(calls.length, 2);
+      assert.equal(calls[0].url, 'https://api.github.com/repos/example-org/garden-hub/installation');
+      assert.doesNotMatch(String(calls[0].options.headers.authorization), /gh[sru]_/);
+    },
+  );
+});
+
+test('APP-008: a usable installation yields a token that only the tool call sees', async () => {
+  const fakeToken = 'ghs_installationtokenvalue0003';
+  const responses = [
+    new Response(JSON.stringify({ id: 99 }), { status: 200 }),
+    new Response(
+      JSON.stringify({ token: fakeToken, permissions: { contents: 'write', pull_requests: 'write' } }),
+      { status: 200 },
+    ),
+  ];
+  const auth = createGithubAppAuth({
+    env: {
+      GHUB_MCP_GITHUB_APP_ID: '1234',
+      GHUB_MCP_GITHUB_APP_PRIVATE_KEY_FILE: '/keys/app.pem',
+    },
+    readFile: () => appKeyPair(),
+    fetchImpl: () => Promise.resolve(responses.shift()),
+  });
+
+  assert.equal(await auth.mintToken({ repo: 'example-org/garden-hub' }), fakeToken);
+  assert.doesNotMatch(JSON.stringify(auth.describe()), new RegExp(fakeToken));
+});
+
+test('APP-009: unreachable GitHub and unreadable keys fail with an app-specific error', async () => {
+  const offline = createGithubAppAuth({
+    env: { GHUB_MCP_GITHUB_APP_ID: '1234', GHUB_MCP_GITHUB_APP_PRIVATE_KEY_FILE: '/keys/app.pem' },
+    readFile: () => appKeyPair(),
+    fetchImpl: () => Promise.reject(new Error('connect ECONNREFUSED')),
+  });
+  await assert.rejects(offline.mintToken({ repo: 'example-org/garden-hub' }), /minting failed: the GitHub API is unreachable/);
+
+  const noKey = createGithubAppAuth({
+    env: { GHUB_MCP_GITHUB_APP_ID: '1234', GHUB_MCP_GITHUB_APP_PRIVATE_KEY_FILE: '/keys/app.pem' },
+    readFile: () => {
+      throw new Error('ENOENT');
+    },
+    fetchImpl: () => Promise.reject(new Error('must not be called')),
+  });
+  await assert.rejects(noKey.mintToken({ repo: 'example-org/garden-hub' }), (error) => {
+    assert.match(error.message, /private key file for app 1234 is not readable/);
+    assert.doesNotMatch(error.message, /keys\/app\.pem|ENOENT/);
+    return true;
+  });
+});
+
+test('APP-010: a stdio write without app configuration fails closed and prints no token', () => {
+  const root = stateRoot();
+  const replies = runStdioClient('codex', root, [
+    {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'pr_create',
+        arguments: { repo: 'example-org/garden-hub', head: 'feature', base: 'main', title: 'Feature' },
+      },
+    },
+  ]);
+
+  assert.equal(replies[0].result.isError, true);
+  const error = JSON.parse(replies[0].result.content[0].text).error;
+  assert.match(error, /not configured/i);
+  assert.match(error, /GHUB_MCP_GITHUB_APP_PRIVATE_KEY_FILE/);
+  assert.match(error, /fall back/i);
+  assert.doesNotMatch(JSON.stringify(replies), /gh[sru]_[A-Za-z0-9]{8,}/);
+  assert.deepEqual(readdirSync(root), [], 'a refused write must not create watch state');
+});
+
+test('APP-011: a write result that echoes the token is scrubbed instead of returned', async () => {
+  const root = stateRoot();
+  const { githubApp, fakeToken } = appConfigured();
+  const server = createMcpServer({
+    root,
+    actor: 'codex',
+    peers: ['codex', 'claude-code'],
+    githubApp,
+    github: {
+      createPullRequest: (args) => ({
+        repo: 'example-org/garden-hub',
+        number: 7,
+        // A misbehaving runner that echoes its environment must not leak it.
+        url: `https://github.com/example-org/garden-hub/pull/7?token=${args.env.GH_TOKEN}`,
+      }),
+      getPullRequestSnapshot: () => snapshot(),
+      mergePullRequest: () => ({ ok: true }),
+      parsePullRequestUrl: () => {
+        throw new Error('not used');
+      },
+      pollWatch: ({ watch }) => ({ state: 'awaiting_review', watch }),
+      submitReview: () => ({ ok: true }),
+    },
+  });
+
+  const reply = await server.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'pr_create',
+      arguments: { repo: 'example-org/garden-hub', head: 'feature', base: 'main', title: 'Feature' },
+    },
+  });
+
+  assert.equal(reply.result.isError, true);
+  assert.doesNotMatch(JSON.stringify(reply), new RegExp(fakeToken));
+  assert.doesNotMatch(JSON.stringify(reply), /gh[sru]_[A-Za-z0-9]{8,}/);
 });

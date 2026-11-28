@@ -137,7 +137,7 @@ describe('Garden Hub collaboration MCP', () => {
     expect(result.watch.approvedBaseSha).toBeUndefined();
   });
 
-  test('[a-pr-watch-shall-retain-responsibility-across-polls-pr-002-pr-creation-starts-an-author-watch] PR creation starts an author watch', () => {
+  test('[a-pr-watch-shall-retain-responsibility-across-polls-pr-002-pr-creation-starts-an-author-watch] PR creation starts an author watch', async () => {
     const root = stateRoot();
     const ref = {
       repo: 'example-org/garden-hub',
@@ -155,9 +155,13 @@ describe('Garden Hub collaboration MCP', () => {
       },
       submitReview: () => ({ ok: true }),
     };
-    const server = createMcpServer({ root, actor: 'codex', peers: ['codex', 'claude-code'], github });
+    const githubApp = {
+      describe: () => ({ githubApp: { configured: true } }),
+      mintToken: async () => 'ghs_installationtokenvalue0000',
+    };
+    const server = createMcpServer({ root, actor: 'codex', peers: ['codex', 'claude-code'], githubApp, github });
 
-    const response = server.handle({
+    const response = await server.handle({
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',

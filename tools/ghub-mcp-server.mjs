@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdirSync, watch } from 'node:fs';
 
 import { createStore } from './ghub-mcp-store.mjs';
+import { createGithubAppAuth } from './ghub-mcp-github-app.mjs';
 import {
   CLAUDE_CHANNEL_CAPABILITY,
   createWakePublisher,
@@ -61,6 +62,12 @@ const tools = [
     },
   },
   {
+    name: 'github_identity',
+    description:
+      'Report which GitHub App identity write tools will use for this agent. Read-only; never returns a token.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'pr_watch',
     description: 'Durably watch a GitHub PR as its author or reviewer and return the current state.',
     inputSchema: {
@@ -74,7 +81,7 @@ const tools = [
   },
   {
     name: 'pr_create',
-    description: 'Create a GitHub PR and immediately start an author watch.',
+    description: 'Create a GitHub PR as the configured GitHub App and immediately start an author watch.',
     inputSchema: {
       type: 'object',
       required: ['repo', 'head', 'base', 'title'],
@@ -98,7 +105,7 @@ const tools = [
   },
   {
     name: 'pr_review',
-    description: 'Submit a comment, change request, or approval as the configured GitHub login.',
+    description: 'Submit a comment, change request, or approval as the configured GitHub App.',
     inputSchema: {
       type: 'object',
       required: ['prUrl', 'event'],
@@ -146,6 +153,7 @@ export function createMcpServer({
   wakeAdapter = process.env.GHUB_MCP_WAKE_ADAPTER,
   emitNotification = (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`),
   onWakeError = (error) => process.stderr.write(`garden-hub wake failed: ${error.message}\n`),
+  githubApp,
   github = {
     createPullRequest,
     getPullRequestSnapshot,
@@ -160,6 +168,11 @@ export function createMcpServer({
     throw new Error(`GHUB_MCP_WAKE_ADAPTER must be one of ${WAKE_MODES.join(', ')}, or empty for auto`);
   }
   const store = createStore({ root, actor, peers });
+  let appAuthInstance;
+  function appAuth() {
+    appAuthInstance ??= githubApp ?? createGithubAppAuth();
+    return appAuthInstance;
+  }
   let adapter = '';
   let negotiated = false;
   let initialized = false;
@@ -202,6 +215,26 @@ export function createMcpServer({
     return watch;
   }
 
+  async function withAppToken(ref, write) {
+    if (typeof ref.repo !== 'string' || ref.repo.trim() === '') {
+      throw new Error('repo is required');
+    }
+    // The token exists only inside this call: it is never returned, logged or
+    // stored, and both the result and any error are scrubbed of it.
+    const token = await appAuth().mintToken({ repo: ref.repo });
+    const redact = (value) => String(value).split(token).join('[redacted]');
+    let written;
+    try {
+      written = await write({ GH_TOKEN: token });
+    } catch (error) {
+      throw new Error(redact(error?.message ?? error));
+    }
+    if (redact(JSON.stringify(written)) !== JSON.stringify(written)) {
+      throw new Error('the GitHub write result contained a credential and was discarded');
+    }
+    return written;
+  }
+
   function callTool(name, args = {}) {
     switch (name) {
       case 'message_send':
@@ -227,18 +260,23 @@ export function createMcpServer({
         };
         return github.pollWatch({ store, watch, snapshot: snapshotFor(ref) });
       }
+      case 'github_identity':
+        return { actor, ...appAuth().describe() };
       case 'pr_create': {
-        const ref = github.createPullRequest(args);
-        const watch = {
-          key: watchKey(ref, actor),
-          repo: ref.repo,
-          number: ref.number,
-          url: ref.url,
-          actor,
-          mode: 'author',
-          createdAt: new Date().toISOString(),
-        };
-        return github.pollWatch({ store, watch, snapshot: snapshotFor(ref) });
+        const repo = args.repo;
+        return withAppToken({ repo }, async (env) => {
+          const ref = github.createPullRequest({ ...args, env });
+          const watch = {
+            key: watchKey(ref, actor),
+            repo: ref.repo,
+            number: ref.number,
+            url: ref.url,
+            actor,
+            mode: 'author',
+            createdAt: new Date().toISOString(),
+          };
+          return github.pollWatch({ store, watch, snapshot: snapshotFor(ref) });
+        });
       }
       case 'pr_poll': {
         const ref = github.parsePullRequestUrl(args.prUrl);
@@ -246,22 +284,28 @@ export function createMcpServer({
       }
       case 'pr_review': {
         const ref = github.parsePullRequestUrl(args.prUrl);
-        const review = github.submitReview({
-          pullRequest: snapshotFor(ref),
-          event: args.event,
-          body: args.body,
+        return withAppToken(ref, async (env) => {
+          const review = github.submitReview({
+            pullRequest: snapshotFor(ref),
+            event: args.event,
+            body: args.body,
+            env,
+          });
+          store.audit('pr_review', `${ref.repo}#${ref.number}`);
+          return review;
         });
-        store.audit('pr_review', `${ref.repo}#${ref.number}`);
-        return review;
       }
       case 'pr_merge': {
         const ref = github.parsePullRequestUrl(args.prUrl);
-        const merged = github.mergePullRequest({
-          watch: ensureWatch(ref),
-          snapshot: snapshotFor(ref),
+        return withAppToken(ref, async (env) => {
+          const merged = github.mergePullRequest({
+            watch: ensureWatch(ref),
+            snapshot: snapshotFor(ref),
+            env,
+          });
+          store.audit('pr_merge', `${ref.repo}#${ref.number}`, merged.ok);
+          return merged;
         });
-        store.audit('pr_merge', `${ref.repo}#${ref.number}`, merged.ok);
-        return merged;
       }
       default:
         throw new Error(`unknown tool "${name}"`);
@@ -296,11 +340,19 @@ export function createMcpServer({
     }
     if (method === 'tools/list') return result(id, { tools });
     if (method === 'tools/call') {
+      let value;
       try {
-        return result(id, textResult(callTool(params?.name, params?.arguments)));
+        value = callTool(params?.name, params?.arguments);
       } catch (error) {
         return result(id, textResult({ error: error.message }, true));
       }
+      if (value && typeof value.then === 'function') {
+        return value.then(
+          (resolved) => result(id, textResult(resolved)),
+          (error) => result(id, textResult({ error: error.message }, true)),
+        );
+      }
+      return result(id, textResult(value));
     }
     return protocolError(id, -32601, `method not found: ${method}`);
   }
@@ -320,7 +372,14 @@ export function runStdio(server = createMcpServer()) {
       return;
     }
     const response = server.handle(request);
-    if (response !== undefined) process.stdout.write(`${JSON.stringify(response)}\n`);
+    if (response === undefined) return;
+    if (typeof response.then === 'function') {
+      response.then((resolved) => {
+        if (resolved !== undefined) process.stdout.write(`${JSON.stringify(resolved)}\n`);
+      });
+      return;
+    }
+    process.stdout.write(`${JSON.stringify(response)}\n`);
   });
 }
 

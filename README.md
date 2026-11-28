@@ -19,7 +19,7 @@ Events are validated (`event_id`, `ts`, `type`, `agent_id`, `payload` are requir
 
 ## Collaboration MCP
 
-The server uses Node built-ins and the local, already-authenticated `gh` CLI. It does not store GitHub credentials or keys.
+The server uses Node built-ins and the local, already-authenticated `gh` CLI for read-only GitHub calls. Write calls (`pr_create`, `pr_review`, `pr_merge`) run as the calling agent's own GitHub App: the installation token is minted inside the tool, used for that one call, and never returned, logged or passed through the model session. The server stores no credentials; it reads the App id and private key file named by the client registration. Read-only calls (`pr_watch`, `pr_poll`, `github_identity`) never mint a token.
 
 ```sh
 codex mcp add garden-hub \
@@ -37,7 +37,19 @@ claude mcp add garden-hub \
 
 Restart the affected client sessions after registration. Each client is bound to its own actor by `GHUB_MCP_ACTOR`, so a tool argument cannot claim to be the other peer. A message is kept while the peer is offline. PR watches are polled while an MCP client is running; there is no daemon or webhook.
 
-The configured actor does not cryptographically distinguish one client from another at GitHub when both use the same local `gh` login, so GitHub-author identity is checked again before review or merge.
+The configured actor selects the App that writes to GitHub, so an agent cannot write as its peer. Read-only calls still use the host `gh` login, which does not distinguish one client from another, so GitHub-author identity is checked again before review or merge.
+
+### GitHub App identity
+
+Each agent's MCP registration names its own GitHub App:
+
+```sh
+--env GHUB_MCP_GITHUB_APP_ID=1234 \
+--env GHUB_MCP_GITHUB_APP_PRIVATE_KEY_FILE=/absolute/path/to/app-private-key.pem \
+--env GHUB_MCP_GITHUB_APP_SLUG=my-agent-app
+```
+
+Optional: `GHUB_MCP_GITHUB_APP_INSTALLATION_ID` skips the per-repository installation lookup. The App installation needs **Contents: write** and **Pull requests: write**. `github_identity` reports which App a write call will use, plus the required permissions, and never returns a token. When the App is not configured or minting fails, write calls fail with an error naming what to configure or which permission is missing; they never fall back to the host `gh` login. Commits pushed by the agent should use the App noreply identity printed by `github_identity` (`<app-id>+<slug>@users.noreply.github.com`) so the PR and its commits share one author.
 
 ### PR safety
 

@@ -8,7 +8,8 @@ It does **not** install an HTTP service, daemon, or hosted endpoint.
 
 - MCP entrypoint: `tools/ghub-mcp-server.mjs`, launched with Node over stdio.
 - Its runtime dependencies: `ghub-mcp-store.mjs`, `ghub-mcp-github.mjs`,
-  `ghub-mcp-wake.mjs` in the same `tools/` directory. Keep them together.
+  `ghub-mcp-github-app.mjs`, `ghub-mcp-wake.mjs` in the same `tools/`
+  directory. Keep them together.
 - OMP wake extension: `extensions/garden-hub-wake.mjs`.
 - Protocol and lifecycle: [docs/channel-wake.md](docs/channel-wake.md).
 - Optional patched Codex archive in the delivery kit:
@@ -31,9 +32,12 @@ shasum -a 256 -c SHASUMS.txt
 ```
 
 Runtime needs Node (tested with 26.5.0); no npm install, build, or API key is
-needed for MCP mail. GitHub PR tools additionally need `gh` installed and
-authenticated as the intended operator (`gh auth status`). Do not embed tokens
-in these examples. Install Claude Code, Codex, or OMP separately.
+needed for MCP mail. Read-only GitHub PR tools (`pr_watch`, `pr_poll`) use the
+local `gh` CLI, so it must be installed and authenticated as the intended
+operator (`gh auth status`). GitHub write tools (`pr_create`, `pr_review`,
+`pr_merge`) never use that login: they run as the agent's own GitHub App, whose
+id and private key file the registration names. Do not embed tokens or private
+keys in these examples. Install Claude Code, Codex, or OMP separately.
 
 Choose **absolute paths** and substitute your real directories:
 
@@ -233,9 +237,30 @@ session is not acceptance of an existing live conversation.
 
 For PR handoff, use `pr_watch`/`pr_poll` to inspect state. `pr_create`,
 `pr_review`, and `pr_merge` perform real GitHub writes: require the operator's
-task-specific authority. Merge requires freshly verified non-author approval
-for the watched head/base; sharing one `gh` login does not create independent
-reviewer identities.
+task-specific authority, and they run as the agent's own GitHub App, never as
+the host `gh` login. Merge requires freshly verified non-author approval for
+the watched head/base.
+
+### GitHub App identity for write tools
+
+Add the App that belongs to the agent to that agent's registration:
+
+```sh
+  --env GHUB_MCP_GITHUB_APP_ID=1234 \
+  --env GHUB_MCP_GITHUB_APP_PRIVATE_KEY_FILE=/absolute/path/to/app-private-key.pem \
+  --env GHUB_MCP_GITHUB_APP_SLUG=my-agent-app \
+```
+
+`GHUB_MCP_GITHUB_APP_INSTALLATION_ID` is optional and skips the per-repository
+installation lookup. The App installation needs **Contents: write** and
+**Pull requests: write**. The server mints an installation token inside the
+write tool call, uses it for that one call, and never returns it, logs it, or
+passes it through the model session. Call `github_identity` to see which App a
+write will use and the required permissions; it returns no token. When the App
+is not configured, or minting fails, the write fails with an error naming what
+to configure or which permission is missing, and no write happens. Commits the
+agent pushes should use the App noreply identity that `github_identity` prints
+(`<app-id>+<slug>@users.noreply.github.com`) so PR and commits share one author.
 
 ## Troubleshooting and rollback
 
@@ -248,8 +273,14 @@ reviewer identities.
   unknown clients require explicit inbox reads.
 - Duplicate wake after reconnect: unacknowledged mail is deliberately replayed.
   Deduplicate within the connection; ack only after handling.
-- `gh` fails: mail still works; configure the intended GitHub identity before
-  attempting PR operations. Do not paste credentials into agent messages.
+- `gh` fails: mail still works; read-only PR calls need a working `gh` login.
+  Do not paste credentials into agent messages.
+- A write tool reports no GitHub App identity: add
+  `GHUB_MCP_GITHUB_APP_ID` and `GHUB_MCP_GITHUB_APP_PRIVATE_KEY_FILE` to that
+  agent's registration, restart the client, and confirm with `github_identity`.
+  Writes never fall back to the host `gh` login.
+- A write tool reports a missing permission: grant the named App permission
+  (Contents: write, Pull requests: write) and approve the installation update.
 
 To disable wake, set `GHUB_MCP_WAKE_ADAPTER=off` in the client registration,
 remove the OMP extension or Claude Code dev-channels launch flag if used, and restart/resume the client.

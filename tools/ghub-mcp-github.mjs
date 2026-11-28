@@ -66,17 +66,18 @@ export function parsePullRequestUrl(value) {
   };
 }
 
-export function defaultGhRunner(args) {
+export function defaultGhRunner(args, { env } = {}) {
   return {
     stdout: execFileSync('gh', args, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...env },
     }),
   };
 }
 
-export function getGithubLogin({ run = defaultGhRunner } = {}) {
-  return String(outputOf(run(['api', 'user', '--jq', '.login']))).trim();
+export function getGithubLogin({ run = defaultGhRunner, env } = {}) {
+  return String(outputOf(run(['api', 'user', '--jq', '.login'], { env }))).trim();
 }
 
 export function getPullRequestSnapshot({ pullRequest, run = defaultGhRunner } = {}) {
@@ -112,7 +113,7 @@ export function getPullRequestSnapshot({ pullRequest, run = defaultGhRunner } = 
   };
 }
 
-export function createPullRequest({ repo, head, base, title, body = '', run = defaultGhRunner } = {}) {
+export function createPullRequest({ repo, head, base, title, body = '', env, run = defaultGhRunner } = {}) {
   for (const [name, value] of Object.entries({ repo, head, base, title })) {
     if (typeof value !== 'string' || value.trim() === '') throw new Error(`${name} is required`);
   }
@@ -131,20 +132,20 @@ export function createPullRequest({ repo, head, base, title, body = '', run = de
         title,
         '--body',
         body,
-      ]),
+      ], { env }),
     ),
   ).trim();
   return parsePullRequestUrl(output);
 }
 
-export function submitReview({ pullRequest, event, body = '', run = defaultGhRunner } = {}) {
+export function submitReview({ pullRequest, event, body = '', env, run = defaultGhRunner } = {}) {
   const normalizedEvent = {
     approve: 'APPROVE',
     request_changes: 'REQUEST_CHANGES',
     comment: 'COMMENT',
   }[event];
   if (!normalizedEvent) throw new Error('review event must be approve, request_changes, or comment');
-  const login = getGithubLogin({ run });
+  const login = getGithubLogin({ run, env });
   if (login === pullRequest.author) {
     throw new Error('the PR author cannot submit a review');
   }
@@ -157,7 +158,7 @@ export function submitReview({ pullRequest, event, body = '', run = defaultGhRun
     `event=${normalizedEvent}`,
     '-f',
     `body=${body}`,
-  ]);
+  ], { env });
   return { ok: true, event: normalizedEvent, reviewer: login };
 }
 
@@ -209,7 +210,7 @@ export function evaluateMergeEligibility({ watch, snapshot } = {}) {
   return { ok: true };
 }
 
-export function mergePullRequest({ watch, snapshot, run = defaultGhRunner } = {}) {
+export function mergePullRequest({ watch, snapshot, env, run = defaultGhRunner } = {}) {
   const eligibility = evaluateMergeEligibility({ watch, snapshot });
   if (!eligibility.ok) return eligibility;
   run([
@@ -221,6 +222,6 @@ export function mergePullRequest({ watch, snapshot, run = defaultGhRunner } = {}
     '--merge',
     '--match-head-commit',
     snapshot.head,
-  ]);
+  ], { env });
   return { ok: true, head: snapshot.head };
 }
