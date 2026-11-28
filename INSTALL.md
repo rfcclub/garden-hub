@@ -59,7 +59,7 @@ Do not register a second conflicting `garden-hub` entry in another scope.
 | --- | --- | --- |
 | Claude Code | Yes, actor `claude-code` | Automatic (`claude` channel); launch with the dev-channels flag below |
 | Patched Codex candidate | Yes, actor `codex` | Opt-in (`codex`) via `GHUB_MCP_TRUSTED_CODEX_SERVER=garden-hub`; exact registered name required |
-| Stock Codex | MCP tools | Hint is sent; do not assume stock Codex acts on it |
+| Stock Codex | MCP tools | None unless the opt-in above is set; stock Codex is assumed not to act on the hint |
 | OMP + bundled extension | Yes, actor `codex` | Automatic (`omp`); extension must be loaded |
 | Other stdio MCP clients | Subject to client MCP support | Automatic only if the client negotiates `common`; otherwise pull |
 | Clients that open with a discovery request | Yes, with or without a handshake | Unchanged by the discovery request: automatic for a client that negotiates `common` or whose `clientInfo.name` matches a known adapter (`Claude Code`, `codex-mcp-client`, `omp-coding-agent`) once that adapter's own trust and setup conditions are met; otherwise pull |
