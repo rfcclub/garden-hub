@@ -150,3 +150,22 @@ test("live write wakes a Claude Code stdio client", async () => {
   expect(peerA.frames.some(f => f.method)).toBe(false);
   expect(claude.errors).toEqual([]);
 });
+
+test("auto keeps the claude path outside the codex trust gate", () => {
+  const dir = root();
+  const message = sender(dir, "codex").sendMessage({ to: "claude-code", body: "DO NOT INJECT THIS" });
+  sender(dir, "claude-code").sendMessage({ to: "codex", body: "DO NOT INJECT THIS EITHER" });
+  const frames: any[] = [];
+  const server = createMcpServer({
+    root: dir, actor: "claude-code", wakeAdapter: undefined,
+    trustedCodexServer: "",
+    emitNotification: (f: any) => frames.push(f),
+  });
+  cleanups.push(() => server.close?.());
+  const init = server.handle({ jsonrpc: "2.0", id: 1, method: "initialize", params: claudeCode });
+  server.handle({ jsonrpc: "2.0", method: "notifications/initialized" });
+  expect(init.result.capabilities.experimental[channel]).toEqual({});
+  expect(frames.map(f => f.method)).toEqual([channelMethod]);
+  expect(frames[0].params.meta.message_id).toBe(message.id);
+  expect(JSON.stringify(frames)).not.toMatch(/DO NOT INJECT/);
+});

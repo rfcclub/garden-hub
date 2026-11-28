@@ -27,8 +27,9 @@ Claude Code delivers it from this non-plugin server only when launched with
 `--dangerously-load-development-channels server:garden-hub`.
 
 Enabled servers advertise the experimental `garden-hub/channel-wake` capability
-with `{"version":1}`. Native adapters are configured explicitly because their
-clients do not expose a custom initialization capability configuration.
+with `{"version":1}`. Auto mode selects native adapters from `clientInfo.name`
+because those clients do not expose a custom initialization capability; an
+explicit adapter value still forces one path.
 
 `GHUB_MCP_WAKE_ADAPTER` selects one receiver mode for each stdio MCP process;
 it is not a global limit of one supported runtime. Each process is connected to
@@ -81,8 +82,9 @@ client is who it claims, and it cannot tell an unrelated MCP server from this on
 ## OMP
 
 Explicitly register a server named exactly `garden-hub` in the owning OMP
-configuration, bound to actor `codex`, and set `GHUB_MCP_WAKE_ADAPTER=omp`.
-Load the extension with:
+configuration, bound to actor `codex`. Auto mode detects OMP from
+`clientInfo.name`; set `GHUB_MCP_WAKE_ADAPTER=omp` only to force the path for a
+client that does not name itself. Load the extension with:
 
 ```sh
 omp -e $GHUB_DIR/extensions/garden-hub-wake.mjs
